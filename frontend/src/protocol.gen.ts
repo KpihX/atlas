@@ -330,7 +330,7 @@ export interface components {
             voice_mode: "active" | "muted";
             /**
              * Capture Mode
-             * @default microphone
+             * @default mixed
              * @enum {string}
              */
             capture_mode: "microphone" | "system" | "mixed";
@@ -599,7 +599,7 @@ export interface components {
             language: "en" | "fr" | "es" | "de" | "pt";
             /**
              * Capture Mode
-             * @default microphone
+             * @default mixed
              * @enum {string}
              */
             capture_mode: "microphone" | "system" | "mixed";

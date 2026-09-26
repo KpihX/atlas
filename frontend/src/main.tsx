@@ -50,7 +50,7 @@ function App() {
   const [connected, setConnected] = useState(false);
   const [view, setView] = useState<View>("flow");
   const [assistantName, setAssistantName] = useState("Assistant");
-  const [captureMode, setCaptureMode] = useState<CaptureMode>("microphone");
+  const [captureMode, setCaptureMode] = useState<CaptureMode>("mixed");
   const [language, setLanguage] = useState<MeetingLanguage>("en");
   const [manual, setManual] = useState("");
   const [error, setError] = useState("");
@@ -122,10 +122,6 @@ function App() {
         const currentLanguage = message.state.language ?? "en";
         setLanguage(currentLanguage);
         languageRef.current = currentLanguage;
-        const hasLiveWork = (message.state.agent_runs ?? []).some((run) => run.status === "running")
-          || (message.state.tasks ?? []).some((task) => task.status === "running" || task.status === "queued")
-          || (message.state.speeches ?? []).some((speech) => ["waiting_gap", "authorized", "playing"].includes(speech.status));
-        if (!hasLiveWork) audio.stopCue();
       }
       else if (message.type === "transcript.partial") setPartial(message.text);
       else if (message.type === "speech.stop") {

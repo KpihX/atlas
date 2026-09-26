@@ -23,7 +23,7 @@ class SessionStart(WireModel):
     type: Literal["session.start"]
     assistant_name: str = "Assistant"
     language: MeetingLanguage = "en"
-    capture_mode: Literal["microphone", "system", "mixed"] = "microphone"
+    capture_mode: Literal["microphone", "system", "mixed"] = "mixed"
     output_mode: Literal["local_only", "room_speaker", "meeting_injected"] = "local_only"
 
 

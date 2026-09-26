@@ -133,15 +133,16 @@ export class AudioBridge {
     const source = context.createBufferSource();
     const now = context.currentTime;
     source.buffer = buffer;
+    source.loop = true;
+    if (buffer.duration > 0.4) {
+      source.loopStart = 0.15;
+      source.loopEnd = Math.max(0.3, buffer.duration - 0.1);
+    }
     gain.gain.setValueAtTime(0.0001, now);
-    gain.gain.exponentialRampToValueAtTime(0.35, now + 0.08);
-    gain.gain.exponentialRampToValueAtTime(0.08, now + Math.max(0.2, buffer.duration - 0.08));
+    gain.gain.exponentialRampToValueAtTime(0.22, now + 0.1);
     source.connect(gain);
     gain.connect(context.destination);
     source.start(now);
-    source.onended = () => {
-      if (this.cue?.source === source) this.cue = undefined;
-    };
     this.cue = { source, gain };
   }
 
@@ -152,8 +153,8 @@ export class AudioBridge {
     const now = this.context.currentTime;
     cue.gain.gain.cancelScheduledValues(now);
     cue.gain.gain.setValueAtTime(Math.max(cue.gain.gain.value, 0.0001), now);
-    cue.gain.gain.exponentialRampToValueAtTime(0.0001, now + 0.16);
-    cue.source.stop(now + 0.18);
+    cue.gain.gain.exponentialRampToValueAtTime(0.0001, now + 0.25);
+    cue.source.stop(now + 0.27);
   }
 
   stopPlayback(): void {

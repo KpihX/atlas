@@ -146,7 +146,7 @@ class MeetingState(DomainModel):
     assistant_name: str = "Assistant"
     language: MeetingLanguage = "en"
     voice_mode: Literal["active", "muted"] = "active"
-    capture_mode: Literal["microphone", "system", "mixed"] = "microphone"
+    capture_mode: Literal["microphone", "system", "mixed"] = "mixed"
     output_mode: Literal["local_only", "room_speaker", "meeting_injected"] = "local_only"
     floor_busy: bool = False
     partial: str = ""

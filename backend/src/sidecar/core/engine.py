@@ -121,9 +121,9 @@ class MeetingEngine:
         self.state.assistant_name = str(payload.get("assistant_name") or self.config.session.assistant_name)
         language = payload.get("language")
         self.state.language = language if language in MEETING_LANGUAGES else self.config.session.language
-        capture = payload.get("capture_mode", "microphone")
+        capture = payload.get("capture_mode", "mixed")
         output = payload.get("output_mode", "local_only")
-        self.state.capture_mode = capture if capture in {"microphone", "system", "mixed"} else "microphone"
+        self.state.capture_mode = capture if capture in {"microphone", "system", "mixed"} else "mixed"
         self.state.output_mode = (
             output if output in {"local_only", "room_speaker", "meeting_injected"} else "local_only"
         )

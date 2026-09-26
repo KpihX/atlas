@@ -696,7 +696,7 @@
               "mixed"
             ],
             "title": "Capture Mode",
-            "default": "microphone"
+            "default": "mixed"
           },
           "output_mode": {
             "type": "string",
@@ -1229,7 +1229,7 @@
               "mixed"
             ],
             "title": "Capture Mode",
-            "default": "microphone"
+            "default": "mixed"
           },
           "output_mode": {
             "type": "string",
