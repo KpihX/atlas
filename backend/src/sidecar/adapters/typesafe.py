@@ -40,19 +40,32 @@ class TypeSafeDecision:
                 "addressed": {
                     "type": "noul",
                     "instructions": (
-                        "Was the configured assistant directly asked or instructed in the new utterance?"
+                        "Was the configured assistant directly asked, named, or given an instruction "
+                        "in the new utterance, as opposed to talking to another human in the meeting?"
                     ),
                 },
                 "route": {
                     "type": "choice",
-                    "instructions": "What should the meeting agent do next?",
+                    "instructions": (
+                        "What should the meeting agent do next? If the utterance is an incomplete fragment "
+                        "or trailing clause with no complete request yet, choose capture. If the utterance "
+                        "contains a request to search, discover, research, or verify information, choose "
+                        "investigate. If the assistant was asked to speak or explain, choose respond."
+                    ),
                     "criteria": {
-                        "ignore": "No useful agent work",
-                        "capture": "Update notes or a visible card without speaking",
-                        "investigate": "Start read-only background work",
-                        "respond": "Prepare an answer for the room",
-                        "act": "Use a registered tool for a direct request",
-                        "control": "The utterance controls the assistant itself",
+                        "ignore": (
+                            "No useful agent work, conversational filler, or private banter between humans"
+                        ),
+                        "capture": (
+                            "Update notes or a visible card without speaking (also select this for "
+                            "incomplete thoughts or trailing fragments)"
+                        ),
+                        "investigate": (
+                            "Start background research or information lookup requested by the room"
+                        ),
+                        "respond": "Prepare a direct spoken answer or status report for the room",
+                        "act": "Execute an immediate direct action or command",
+                        "control": "The utterance controls the assistant state (mute, unmute, pause, stop)",
                     },
                 },
                 "salience": {

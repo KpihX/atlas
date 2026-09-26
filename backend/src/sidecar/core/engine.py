@@ -475,9 +475,16 @@ class MeetingEngine:
         await self._activity("decided", f"{decision.route}: {decision.rationale}")
         await self._broadcast_state()
 
-        direct = decision.addressed_probability >= 0.5 or decision.route in {"respond", "control"}
-        if direct:
+        wake_name = self.state.assistant_name.casefold().strip()
+        has_wake = bool(wake_name and wake_name in utterance.text.casefold())
+        addressed_strictly = decision.addressed_probability >= 0.7 or has_wake
+
+        should_speak = (addressed_strictly and decision.route in {"respond", "control"}) or (
+            decision.speech_value >= 0.9 and decision.route == "respond"
+        )
+        if should_speak:
             self._spawn(self._speaker_turn(utterance, decision, session_id))
+
         if decision.route in {"ignore", "respond", "control"}:
             return
 
@@ -815,7 +822,7 @@ class MeetingEngine:
         await self._activity("agent.started", f"{agent}: {summary}")
         await self.store.save(self.state)
         await self._broadcast_state()
-        if agent in {"speaker", "worker"} and not self.state.floor_busy:
+        if agent == "speaker" and not self.state.floor_busy and self.state.voice_mode == "active":
             self._spawn(self._publish_presence_cue(run.id, summary), speech=True)
         return run
 
@@ -825,9 +832,14 @@ class MeetingEngine:
         language = self.state.language
         audio = self._presence_audio.get(language)
         if audio is None:
-            result = await self.tts.synthesize("Hmmmmmmmmmmmmmmmmmmmmmm...", language)
-            audio = self.tts_result(result)
-            self._presence_audio[language] = audio
+            cue_text = "Mmh..." if language == "fr" else "Mmm..."
+            try:
+                result = await self.tts.synthesize(cue_text, language)
+                audio = self.tts_result(result)
+                self._presence_audio[language] = audio
+            except Exception as error:
+                logger.warning("presence.cue synthesize failed: %s", type(error).__name__)
+                return
         run = next((item for item in self.state.agent_runs if item.id == run_id), None)
         if run is None or run.status != "running" or self.state.floor_busy:
             return

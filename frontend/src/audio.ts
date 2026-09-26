@@ -37,13 +37,29 @@ export class AudioBridge {
       }));
     }
     if (mode === "system" || mode === "mixed") {
-      const display = await navigator.mediaDevices.getDisplayMedia({ audio: true, video: true });
-      for (const track of display.getVideoTracks()) track.stop();
-      if (display.getAudioTracks().length === 0) {
-        display.getTracks().forEach((track) => track.stop());
-        throw new Error("The selected surface did not provide system audio.");
+      try {
+        const display = await navigator.mediaDevices.getDisplayMedia({
+          video: true,
+          audio: {
+            suppressLocalAudioPlayback: false,
+          },
+          systemAudio: "include",
+        } as DisplayMediaStreamOptions);
+        for (const track of display.getVideoTracks()) track.stop();
+        if (display.getAudioTracks().length === 0) {
+          display.getTracks().forEach((track) => track.stop());
+          if (mode === "system") {
+            throw new Error(
+              "No audio track was shared. In Chromium/Linux, select an 'Edge Tab' (e.g. Google Meet tab) with 'Share tab audio' checked.",
+            );
+          }
+        } else {
+          this.streams.push(display);
+        }
+      } catch (error) {
+        if (mode === "system") throw error;
+        // In mixed mode, if display audio fails or has no audio, we still allow microphone to continue
       }
-      this.streams.push(display);
     }
     const mix = this.context.createGain();
     for (const stream of this.streams) this.context.createMediaStreamSource(stream).connect(mix);
@@ -98,24 +114,6 @@ export class AudioBridge {
     this.playback = undefined;
   }
 
-  speakBrowser(text: string, language: string): Promise<void> {
-    this.stopPlayback();
-    return new Promise((resolve) => {
-      const utterance = new SpeechSynthesisUtterance(text);
-      utterance.lang = language;
-      this.playbackActive = true;
-      utterance.onend = () => {
-        this.playbackActive = false;
-        resolve();
-      };
-      utterance.onerror = () => {
-        this.playbackActive = false;
-        resolve();
-      };
-      speechSynthesis.speak(utterance);
-    });
-  }
-
   async playCue(audio?: { data_base64?: string; format?: string; sample_rate?: number }): Promise<void> {
     if (this.playbackActive || this.floorBusy || this.cue || !audio?.data_base64) return;
     const context = this.context && this.context.state !== "closed" ? this.context : new AudioContext();
@@ -136,7 +134,7 @@ export class AudioBridge {
     const now = context.currentTime;
     source.buffer = buffer;
     gain.gain.setValueAtTime(0.0001, now);
-    gain.gain.exponentialRampToValueAtTime(0.42, now + 0.08);
+    gain.gain.exponentialRampToValueAtTime(0.35, now + 0.08);
     gain.gain.exponentialRampToValueAtTime(0.08, now + Math.max(0.2, buffer.duration - 0.08));
     source.connect(gain);
     gain.connect(context.destination);
@@ -169,7 +167,6 @@ export class AudioBridge {
       }
       this.playback = undefined;
     }
-    speechSynthesis.cancel();
   }
 
   private process(input: Float32Array): void {

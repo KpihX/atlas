@@ -363,7 +363,6 @@ async function playSpeech(
     if (message.audio) {
       await audio.playAudio(message.audio.data_base64, message.audio.format, message.audio.sample_rate);
     }
-    else await audio.speakBrowser(message.text, language);
     if (activeSpeech.current === message.speech_id) {
       activeSpeech.current = null;
       send(socket, { type: "playback.finished", speech_id: message.speech_id });
