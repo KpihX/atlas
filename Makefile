@@ -66,7 +66,8 @@ log:  ## Show recent Git history
 	@git log --oneline -10 2>&1 || true
 
 push:  ## Push the current branch to every configured remote
-	@remotes="$$(git remote)"; \
-	if [[ -z "$$remotes" ]]; then printf 'No Git remote is configured.\n' >&2; exit 1; fi; \
-	branch="$$(git branch --show-current)"; \
-	for remote in $$remotes; do git push "$$remote" "$$branch"; done
+	@branch="$$(git branch --show-current)"; \
+	git remote | while read -r remote; do \
+		printf '==> pushing %s to %s\n' "$$branch" "$$remote"; \
+		git push -u "$$remote" "$$branch"; \
+	done
