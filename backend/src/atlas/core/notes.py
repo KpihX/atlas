@@ -11,7 +11,10 @@ from .models import NotesDocument, Task, Utterance
 
 SPACE = re.compile(r"\s+")
 SOURCE_ID = re.compile(r"\b(?:utt|task|card)_[a-zA-Z0-9]+\b")
-UNKNOWN_PARTICIPANT = re.compile(r"^(unknown|unidentified|speaker\s*\d*)\b", re.IGNORECASE)
+UNKNOWN_PARTICIPANT = re.compile(
+    r"^(unknown|unidentified|speaker\s*\d*|inconnu|inconnue|allah\s*sp[eé]ci|dieu|allah)\b",
+    re.IGNORECASE,
+)
 LIMITS = {
     "synthesis": 4,
     "participants": 8,

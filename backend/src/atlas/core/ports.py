@@ -32,6 +32,9 @@ class STTPort(Protocol):
     @property
     def connected(self) -> bool: ...
 
+    @property
+    def rotate_after_seconds(self) -> float: ...
+
     async def start(
         self,
         on_partial: TextCallback,

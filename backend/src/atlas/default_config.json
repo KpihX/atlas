@@ -19,26 +19,60 @@
   },
   "voice": {
     "stt": {
-      "provider": "gradium",
-      "endpoint": "wss://api.gradium.ai/api/speech/asr",
-      "secret_env": "GRADIUM_API_KEY",
-      "model": "default",
-      "input_format": "pcm_24000",
-      "language": "en",
-      "delay_in_frames": 16,
-      "rotate_after_seconds": 285
+      "active": "gradium/default",
+      "providers": [
+        {
+          "id": "openai/gpt-4o-mini-transcribe",
+          "provider": "openai",
+          "endpoint": "wss://api.openai.com/v1/realtime?intent=transcription",
+          "secret_env": "OPENAI_API_KEY",
+          "model": "gpt-4o-mini-transcribe",
+          "input_format": "pcm_24000",
+          "language": "en",
+          "rotate_after_seconds": 3300,
+          "noise_reduction": "far_field",
+          "silence_duration_ms": 500
+        },
+        {
+          "id": "gradium/default",
+          "provider": "gradium",
+          "endpoint": "wss://api.gradium.ai/api/speech/asr",
+          "secret_env": "GRADIUM_API_KEY",
+          "model": "default",
+          "input_format": "pcm_24000",
+          "language": "en",
+          "delay_in_frames": 16,
+          "rotate_after_seconds": 285
+        }
+      ]
     },
     "tts": {
-      "provider": "gradium",
-      "endpoint": "wss://api.gradium.ai/api/speech/tts",
-      "secret_env": "GRADIUM_API_KEY",
-      "voice_id_env": "GRADIUM_VOICE_ID",
-      "voice_id": "b35yykvVppLXyw_l",
-      "model": "default",
-      "output_format": "opus",
-      "temperature": 0.9,
-      "cfg_coef": 2.2,
-      "padding_bonus": -0.5
+      "active": "gradium/default",
+      "providers": [
+        {
+          "id": "openai/gpt-4o-mini-tts",
+          "provider": "openai",
+          "endpoint": "https://api.openai.com/v1/audio/speech",
+          "secret_env": "OPENAI_API_KEY",
+          "voice_id": "marin",
+          "model": "gpt-4o-mini-tts",
+          "output_format": "pcm_24000",
+          "instructions": "Speak naturally and conversationally. Never read punctuation, URLs, identifiers, or markup aloud."
+        },
+        {
+          "id": "gradium/default",
+          "provider": "gradium",
+          "endpoint": "wss://api.gradium.ai/api/speech/tts",
+          "secret_env": "GRADIUM_API_KEY",
+          "voice_id_env": "GRADIUM_VOICE_ID",
+          "voice_id": "b35yykvVppLXyw_l",
+          "model": "default",
+          "output_format": "opus",
+          "temperature": 0.9,
+          "cfg_coef": 2.2,
+          "padding_bonus": -0.5
+        }
+      ]
     }
   },
   "decision": {

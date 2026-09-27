@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 from enum import StrEnum
-from typing import Any, Literal
+from typing import Any, Literal, cast
 from uuid import uuid4
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
@@ -173,7 +173,8 @@ class Decision(DomainModel):
     def migrate_legacy_scores(cls, value: object) -> object:
         if not isinstance(value, dict):
             return value
-        migrated = dict(value)
+        source = cast(dict[object, object], value)
+        migrated: dict[str, object] = {key: item for key, item in source.items() if isinstance(key, str)}
         legacy_fields = {
             "addressed_probability",
             "salience",

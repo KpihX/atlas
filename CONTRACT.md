@@ -1,14 +1,14 @@
 # Architecture Contract
 
-> Status: v0.1 exists. The multi-agent architecture in this contract is the target rebuild.
+> Status: Atlas v0.2 implements the runtime described here. Explicit future evolutions are labelled.
 
 ```text
 project_id       = "atlas"
-contract_version = "4.0.0"
+contract_version = "5.0.0"
 backend          = "Python 3.12 + FastAPI + uv"
 frontend         = "TypeScript + React + Vite + Bun"
 live_protocol    = "HTTP bootstrap + WebSocket"
-storage          = "SQLite event journal + projections"
+storage          = "SQLite canonical session snapshots + projections"
 ```
 
 The product is an agent sitting beside a meeting. It is not a meeting platform and no bot joins the
@@ -39,10 +39,10 @@ conversation while work is running.
          |                           | playback state                      | new utterance
          |                           v                                     v
          |                 +------------------+       +------------------------------------------+
-         |                 | WebSocket Hub    |<----->|              EVENT JOURNAL               |
+         |                 | WebSocket Hub    |<----->|          STATE MUTATION BOUNDARY          |
          |                 |                  |       |                                          |
-         |                 | audio in         |       | the ordered history of what happened     |
-         |                 | state out        |       | never the owner of business decisions    |
+         |                 | audio in         |       | validates and serializes state changes   |
+         |                 | state out        |       | never invents business decisions         |
          |                 +---------+--------+       +--------------------+---------------------+
          |                           |                                     |
          |                           |                                     v
@@ -80,7 +80,7 @@ conversation while work is running.
          |                                         |
          |                                         v
          |                           +---------------------------+
-         |             Opus audio    | Gradium TTS + sanitizer  |
+         |              PCM audio    | TTS registry + sanitizer |
          +---------------------------+ conversational prose only |
                                      +---------------------------+
 
@@ -91,31 +91,31 @@ conversation while work is running.
                                      +---------------------------+
                                      | SQLite                    |
                                      |                           |
-                                     | complete journal          |
+                                     | canonical session state   |
                                      | full tool evidence        |
                                      | session exports           |
                                      +---------------------------+
 ```
 
 The center of the system is Shared Memory, not a coordinator. Agents never call one another. They
-consume memory, publish facts to the journal, and let projectors update memory.
+consume one canonical session state and publish typed mutations through the engine boundary.
 
 ---
 
 ## Shared Memory, Opened
 
 ```text
- SOURCES                         JOURNAL                         PROJECTIONS
- -------                         -------                         -----------
+ SOURCES                    MUTATION BOUNDARY                    PROJECTIONS
+ -------                    -----------------                    -----------
 
  human sentence --------+
  worker progress --------+       +--------------------+          +----------------------+
- worker result ----------+------>| ordered facts      |--------->| conversation view    |
+ worker result ----------+------>| typed mutation     |--------->| conversation view    |
  notes revision ---------+       |                    |          | recent turns          |
- board operation --------+       | append only        |          | prior agent speech   |
+ board operation --------+       | serialized apply   |          | prior agent speech   |
  playback state ---------+       | session scoped     |          +----------------------+
- session command --------+       | timestamped        |
-                               | source linked      |          +----------------------+
+ session command --------+       | source linked      |
+                              | bounded activity   |          +----------------------+
                                +---------+----------+--------->| work view            |
                                          |                     | running tasks         |
                                          |                     | progress              |
@@ -351,11 +351,11 @@ One session ID owns one journal scope. The browser never owns canonical session 
 
  backend/api/schemas.py --------------------> OpenAPI -----------------> protocol.gen.ts
 
- backend/config.py + installed config.json -> providers + models + timing
+ backend/config.py + installed atlas.json -> providers + models + timing
 
  Tool Registry -----------------------------> tool schema + effect class
 
- SQLite Journal ----------------------------> complete durable truth
+ SQLite sessions ---------------------------> complete durable truth
 
  Shared Memory -----------------------------> bounded current projection
 ```
@@ -365,57 +365,45 @@ tool payload.
 
 ---
 
-## Physical Backend Map
+## Physical Implementation Map
 
 ```text
 backend/src/atlas/
 |
-+-- runtime/
-|   +-- supervisor.py          agent lifecycle and recovery
-|   +-- event_bus.py           publish / subscribe
-|   +-- scheduler.py           priorities and bounded concurrency
-|
-+-- memory/
-|   +-- journal.py             append-only session facts
-|   +-- shared_memory.py       current immutable snapshot
-|   +-- projections.py         conversation / work / knowledge / social
-|
-+-- agents/
-|   +-- speaker.py             always available, no slow tool
-|   +-- notes.py               living document
-|   +-- board.py               create / update / merge / delete
-|   +-- naming.py              session title
-|   +-- workers.py             research supervision
-|
-+-- voice/
-|   +-- floor.py               wait / authorize / interrupt
-|   +-- sanitizer.py           conversational text boundary
-|   +-- playback.py            queue and cancellation
-|
-+-- tools/
-|   +-- registry.py            one extension seam
-|   +-- exa.py
-|   +-- jinko.py
++-- core/
+|   +-- engine.py              session microkernel and concurrency
+|   +-- models.py              canonical typed state
+|   +-- ports.py               provider-independent boundaries
+|   +-- decisions.py           semantic Jev contract
+|   +-- speaker.py             always-available conversational agent
+|   +-- coordinator.py         Workers and Board reconciliation
+|   +-- notes.py               structured memory and Markdown projection
+|   +-- speech.py / voice.py   floor, sanitizer and output policy
+|   `-- tools.py               typed tool registry
 |
 +-- adapters/
-|   +-- gradium_stt.py
-|   +-- gradium_tts.py
-|   +-- typesafe_jev.py
-|   +-- sqlite.py
+|   +-- gradium.py             Gradium STT and TTS
+|   +-- openai_stt.py          OpenAI realtime transcription
+|   +-- openai_tts.py          OpenAI streamed PCM speech
+|   +-- stt_registry.py        active provider and fallback
+|   +-- tts_registry.py        active provider and safe fallback
+|   +-- typesafe.py            Jev
+|   +-- exa.py / jinko.py      read-only tools
+|   `-- sqlite.py              canonical session snapshots
 |
-+-- api/
-    +-- http.py
-    +-- websocket.py
-    +-- schemas.py
++-- api/                       HTTP, WebSocket, schemas and composition root
++-- llm/                       provider-independent generator client
++-- config.py                  strict configuration and provider registries
+`-- prompts.py                 centralized model-facing instructions
 ```
 
 Dependency direction:
 
 ```text
- API ---------> runtime ---------> agents ---------> ports
-                    |                ^                 ^
-                    v                |                 |
-                 memory             +------------- adapters
+ API composition root ---------> AtlasEngine ---------> core ports
+                                      |                    ^
+                                      v                    |
+                              canonical state         adapters
 
  agents  -X-> FastAPI
  agents  -X-> browser
@@ -447,14 +435,14 @@ Dependency direction:
 Materialized now:
 
 ```text
- real microphone and Gradium STT
+ real microphone and switchable Gradium/OpenAI STT
  multilingual sessions
  SQLite sessions and exports
  Jev decisions
  Exa and Jinko registry
  structured bounded living notes
  agentic board operations
- realtime PCM TTS streaming and browser playback
+ switchable TTS registry, realtime PCM streaming and browser playback
  barge-in, mute, unmute and End
  visible agent/tool timelines
 ```
@@ -479,7 +467,7 @@ to Worker execution.
  Speaker never waits for Worker.
  Worker never speaks.
  Agent never calls another agent directly.
- Every durable fact enters through Event Journal.
+ Every session mutation updates one canonical backend state.
  Every agent reads the same Shared Memory version.
  Only final projection apply is serialized.
  Human speech interrupts playback locally first.
@@ -521,6 +509,10 @@ to Worker execution.
  fallback model      = llm.roles.fallback
  fast decision       = TypeSafe Jev
 
+ registered voice providers:
+   Gradium STT / TTS
+   OpenAI gpt-4o-mini-transcribe / gpt-4o-mini-tts
+
  registered generators:
    OpenAI GPT-5 mini
    OpenAI GPT-4.1 mini
@@ -543,7 +535,7 @@ model may fall back to the configured fallback. Configuration selects models thr
 
 ```text
  unit contracts        models, stores, decisions, tools, voice sanitizer
- provider loops        Gradium TTS -> STT in English and French
+ provider loops        Gradium voice plus isolated OpenAI voice smoke
  conversation smoke    direct answer -> repeat -> clarification, no tool
  control smoke         mute -> unmute -> spoken End
  social smoke          playback -> barge-in -> End during pending answer

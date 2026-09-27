@@ -61,8 +61,10 @@ class PromptCatalog:
         "captures "
         "the current understanding, not chronology. Do not include {companion_name} introductions, "
         "capability answers, "
-        "note-taking, or requests merely asking Atlas to speak. Participants contains unique named people "
-        "only. Topics contains durable subjects, not fragments. Hypotheses contains uncertain claims. "
+        "note-taking, or requests merely asking Atlas to speak. Participants contains only unique, confirmed "
+        "human attendees established by the room context as actual speakers. Never list the companion, "
+        "unknown speakers, transcription artifacts, or merely mentioned people as participants. Topics "
+        "contains durable subjects, not fragments. Hypotheses contains uncertain claims. "
         "Findings contains evidence-backed results. Ideas contains proposals raised in the room. Questions "
         "contains only substantive unresolved questions. Decisions contains accepted choices. "
         "Recommendations contains suggested next steps that nobody has committed to. Commitments contains "
@@ -97,7 +99,11 @@ class PromptCatalog:
         "every desired card, source_card_ids lists every existing "
         "card it replaces; use an empty list only for a materially new concept. Every existing card ID must "
         "appear in at most one desired card. Keep stable concept_key values when the thesis survives. Titles "
-        "are specific and bodies are concise current syntheses. Never invent facts."
+        "are specific and bodies are concise current syntheses. Create a card only for a meaningful durable "
+        "concept that can independently be discussed, answered, accepted, rejected, or acted on. Do not "
+        "turn transcription uncertainty, incidental names, generic process advice, or inferred coordination "
+        "duties into cards. When evidence is insufficient, preserve existing cards and create nothing. Never "
+        "invent facts."
     )
     board_review_template: str = (
         "Review the proposed desired board against the original cards and shared memory already provided. "
@@ -171,38 +177,51 @@ class PromptCatalog:
                 "type": "choice",
                 "instructions": (
                     "Identify the intended addressee of the complete utterance from its meaning and turn "
-                    "history. A mention is not an address. Corrections such as 'I am talking to Pavel' make "
-                    "another_participant explicit. Choose atlas only when "
-                    f"{companion_name} is genuinely being "
-                    "addressed; room for a contribution offered to everyone; uncertain when context is "
-                    "insufficient."
+                    "history. Resolve likely speech-recognition distortions of names semantically from "
+                    "phonetics, grammar, prior turns, and the requested action instead of requiring an exact "
+                    f"spelling. A mention of a third-party is not an address to them if the speaker "
+                    f"is ordering {companion_name} to do something (e.g. 'Atlas présente à moi et à Pavel'). "
+                    "Conversely, direct human-to-human remarks "
+                    "('Pavel, qu'en penses-tu ?' or 'Je parle à Pavel') "
+                    "are another_participant. Choose atlas when the companion is addressed or commanded; "
+                    "another_participant for human-addressed remarks; room for general unaddressed "
+                    "discussion; "
+                    "uncertain when context is insufficient."
                 ),
                 "criteria": {
-                    "atlas": f"The participant is speaking to {companion_name}",
-                    "another_participant": "The participant is speaking to a named or contextual human",
-                    "room": "The utterance is offered to the group without a single addressee",
-                    "uncertain": "The intended addressee cannot be established semantically",
+                    "atlas": (
+                        f"The speaker is addressing, asking, or commanding {companion_name}, including a "
+                        "contextually clear ASR distortion"
+                    ),
+                    "another_participant": "The speaker is addressing a human participant in the meeting",
+                    "room": "The utterance is addressed generally to the meeting without targeting the AI",
+                    "uncertain": "The intended addressee cannot be deduced from context",
                 },
             },
             "route": {
                 "type": "choice",
                 "instructions": (
-                    "Choose the most useful next behavior from meaning and context. Distinguish passive "
-                    "memory "
-                    "capture from a concrete background mission, direct answer, external action, or state "
-                    "control. An incomplete thought is capture unless prior turns make its intended action "
-                    "unambiguous. Investigate may represent either an assigned mission or a proactive "
-                    "evidence "
-                    "check when unresolved uncertainty materially threatens the room's active goal and a "
-                    "registered capability can reduce it. Do not infer behavior from keywords alone."
+                    "Choose the most useful next behavior from meaning and context. "
+                    "When participants express a desire for information, data, facts, or exploration "
+                    "(e.g. 'ce serait bien d'avoir des infos sur...', "
+                    "'si on pouvait savoir ce qui s'est passé...', "
+                    "'fais des recherches sur...', 'trouve les éléments sur...'), choose investigate. "
+                    "Investigate must be chosen whether the request is explicitly commanded to the companion "
+                    "(initiative=assigned) or emerged as an unassigned evidence need during discussion "
+                    "(initiative=proactive). "
+                    "Choose respond for conversational replies or status queries; act for external actions; "
+                    "control for state changes (mute, pause, stop); capture for silent notes updates; "
+                    "ignore only for pure noise or irrelevant filler."
                 ),
                 "criteria": {
                     "ignore": "No useful work, filler, or private human banter",
-                    "capture": "Update shared memory silently",
-                    "investigate": "Run a concrete information mission through a registered tool",
-                    "respond": "Prepare a direct spoken answer or truthful status report",
-                    "act": "Execute an external action through a registered capability",
-                    "control": f"Change {companion_name} state such as mute, unmute, pause, or stop",
+                    "capture": "Update shared memory silently with ideas/opinions",
+                    "investigate": (
+                        "Run an external information or verification mission through tools (Exa/Jinko)"
+                    ),
+                    "respond": "Direct conversational answer, greeting, or status report",
+                    "act": "Execute an external side-effecting action",
+                    "control": f"Change {companion_name} operational state",
                 },
             },
             "memory": {
@@ -220,18 +239,18 @@ class PromptCatalog:
             "initiative": {
                 "type": "choice",
                 "instructions": (
-                    f"Classify why a concrete mission should run. Choose assigned when participants have "
-                    f"entrusted a concrete task to {companion_name}. Choose proactive when no task was "
-                    "assigned "
-                    "but an unresolved external-evidence gap materially threatens the active goal and a "
-                    "registered capability can reduce that uncertainty now. Choose none for speculation, "
-                    "human-only discussion, incomplete thoughts, or work that needs no background mission."
+                    f"Classify why an investigation or response should occur. "
+                    f"Choose assigned when participants ask, command, or instruct {companion_name} to do "
+                    "something. Choose proactive when participants express a clear need for external data, "
+                    "fact-checking, or background information, "
+                    "even without naming the AI directly, or when an evidence gap blocks the discussion. "
+                    "Choose none for human-only opinions, agreements, or completed thoughts."
                 ),
                 "criteria": {
-                    "none": "No concrete background mission is warranted",
-                    "assigned": f"A concrete mission was assigned to {companion_name}",
+                    "none": "No background mission or spontaneous intervention needed",
+                    "assigned": f"Directly requested or ordered by participants to {companion_name}",
                     "proactive": (
-                        "A timely evidence check can prevent material error or unlock the active goal"
+                        "Spontaneous evidence check or assistance to unblock or inform the meeting's need"
                     ),
                 },
             },

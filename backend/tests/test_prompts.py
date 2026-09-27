@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import inspect
+from typing import cast
 
 from atlas import config
 from atlas.adapters import typesafe
@@ -42,9 +43,22 @@ def test_semantic_decision_contract_contains_no_behavioral_scores_or_thresholds(
     questions = config.PROMPTS.jev_questions("Atlas")
     for question in questions.values():
         assert isinstance(question, dict)
-        assert question.get("type") == "choice"
+        typed_question = cast(dict[str, object], question)
+        assert typed_question.get("type") == "choice"
     assert not {
         "addressed_threshold",
         "mission_threshold",
         "memory_threshold",
     }.intersection(config.DecisionConfig.model_fields)
+
+
+def test_jev_contract_handles_asr_names_and_implicit_information_needs() -> None:
+    questions = config.PROMPTS.jev_questions("Atlas")
+    addressee = str(questions["addressee"])
+    route = str(questions["route"])
+    initiative = str(questions["initiative"])
+    assert "speech-recognition distortions" in addressee
+    assert "exact spelling" in addressee
+    assert "desire for information" in route
+    assert "initiative=proactive" in route
+    assert "without naming the AI directly" in initiative

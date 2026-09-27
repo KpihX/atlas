@@ -197,6 +197,7 @@ class SequenceDecision(FakeDecision):
 class FakeSTT:
     available = False
     connected = False
+    rotate_after_seconds = 285.0
 
     async def start(self, on_partial: Any, on_final: Any, on_event: Any, language: str) -> None:
         pass
@@ -692,6 +693,25 @@ async def test_requested_result_tts_failure_never_leaves_phantom_voice_active() 
     assert not any(message.get("type") == "speech.authorized" for message in published)
     assert engine._active_speech_id is None
     assert engine._playback_idle.is_set()
+    await engine.stop()
+
+
+@pytest.mark.asyncio
+async def test_requested_result_survives_newer_room_turn() -> None:
+    published: list[dict[str, object]] = []
+    engine = build_engine(FakeDecision(route="capture", addressed=False), FakeGenerator(), published)
+    await engine.start()
+    await engine.start_session({})
+    original_epoch = engine.state.room_epoch
+    engine.state.room_epoch += 1
+    speech = Speech(
+        text="The background research result is ready.",
+        reason="requested_result",
+        room_epoch=original_epoch,
+    )
+    await engine._deliver(speech)
+    assert speech.status == "authorized"
+    assert any(message.get("type") == "speech.authorized" for message in published)
     await engine.stop()
 
 

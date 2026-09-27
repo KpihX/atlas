@@ -14,4 +14,15 @@ describe("AtlasSubtitles", () => {
     rerender(<AtlasSubtitles enabled text="Current spoken phrase" companionName="Atlas" />);
     expect(screen.getByRole("status").textContent).toContain("Current spoken phrase");
   });
+
+  it("shows the current trailing clauses without ellipsis for long speech", () => {
+    const longText =
+      "The first sentence explains the background in detail. " +
+      "The second sentence contains the current spoken point. " +
+      "The final sentence is what participants should read now.";
+    render(<AtlasSubtitles enabled text={longText} companionName="Atlas" />);
+    const subtitle = screen.getByRole("status");
+    expect(subtitle.textContent).toContain("The final sentence is what participants should read now.");
+    expect(subtitle.textContent).not.toContain("...");
+  });
 });

@@ -11,7 +11,7 @@ from typing import Any, cast
 
 from websockets.asyncio.client import ClientConnection, connect
 
-from atlas.config import STTConfig, TTSConfig, secret
+from atlas.config import STTModelConfig, TTSModelConfig, secret
 from atlas.core.models import AudioResult
 from atlas.core.ports import AudioChunkCallback, EventCallback, TextCallback, TextTimingCallback
 
@@ -27,7 +27,7 @@ def _json_message(raw: str | bytes) -> dict[str, Any]:
 
 
 class GradiumSTT:
-    def __init__(self, config: STTConfig) -> None:
+    def __init__(self, config: STTModelConfig) -> None:
         self.config = config
         self._secret = secret(config.secret_env)
         self._ws: ClientConnection | None = None
@@ -48,6 +48,10 @@ class GradiumSTT:
     @property
     def connected(self) -> bool:
         return self._ws is not None
+
+    @property
+    def rotate_after_seconds(self) -> float:
+        return self.config.rotate_after_seconds
 
     async def start(
         self,
@@ -207,7 +211,7 @@ class GradiumSTT:
 
 
 class GradiumTTS:
-    def __init__(self, config: TTSConfig) -> None:
+    def __init__(self, config: TTSModelConfig) -> None:
         self.config = config
         self._secret = secret(config.secret_env)
         self._voice_id = secret(config.voice_id_env) or config.voice_id

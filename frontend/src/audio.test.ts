@@ -105,8 +105,22 @@ describe("AudioBridge capture", () => {
 
     for (let index = 0; index < 4; index += 1) mixProcessor.onaudioprocess?.(event);
     expect(onBargeIn).not.toHaveBeenCalled();
-    for (let index = 0; index < 3; index += 1) floorProcessor.onaudioprocess?.(event);
+    for (let index = 0; index < 6; index += 1) floorProcessor.onaudioprocess?.(event);
     expect(onBargeIn).toHaveBeenCalledOnce();
+    await bridge.stopCapture();
+  });
+
+  it("does not interrupt playback for moderate microphone leakage", async () => {
+    const onBargeIn = vi.fn();
+    const bridge = new AudioBridge(vi.fn(), vi.fn(), vi.fn(), onBargeIn);
+    await bridge.start("mixed");
+    Object.defineProperty(bridge, "playbackActive", { value: true, writable: true });
+    const floorProcessor = FakeContext.processors[1];
+    const leakage = new Float32Array(2048).fill(0.055);
+    const event = { inputBuffer: { getChannelData: () => leakage } } as unknown as AudioProcessingEvent;
+
+    for (let index = 0; index < 10; index += 1) floorProcessor.onaudioprocess?.(event);
+    expect(onBargeIn).not.toHaveBeenCalled();
     await bridge.stopCapture();
   });
 });

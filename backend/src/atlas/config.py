@@ -56,33 +56,106 @@ class StorageConfig(StrictModel):
         return data_home / "atlas" / "atlas.db"
 
 
-class STTConfig(StrictModel):
-    provider: Literal["gradium"]
+class STTModelConfig(StrictModel):
+    id: str
+    provider: Literal["gradium", "openai"] | None = None
     endpoint: str
     secret_env: str
-    model: str
-    input_format: str
-    language: str
-    delay_in_frames: int = Field(ge=7, le=55)
-    rotate_after_seconds: float = Field(default=285, gt=0, lt=300)
+    model: str | None = None
+    input_format: str = "pcm_24000"
+    language: str = "en"
+    delay_in_frames: int = Field(default=16, ge=7, le=55)
+    rotate_after_seconds: float = Field(default=285, gt=0, le=3600)
+    noise_reduction: Literal["near_field", "far_field"] = "far_field"
+    silence_duration_ms: int = Field(default=500, ge=200, le=2000)
+
+    @model_validator(mode="after")
+    def resolve_reference(self) -> STTModelConfig:
+        try:
+            inferred_provider, inferred_model = self.id.split("/", 1)
+        except ValueError as error:
+            raise ValueError("STT model IDs must use provider/model") from error
+        if inferred_provider not in {"gradium", "openai"}:
+            raise ValueError(f"unsupported STT provider: {inferred_provider}")
+        if self.provider is not None and self.provider != inferred_provider:
+            raise ValueError("STT provider conflicts with its provider/model ID")
+        if self.model is not None and self.model != inferred_model:
+            raise ValueError("STT model conflicts with its provider/model ID")
+        object.__setattr__(self, "provider", inferred_provider)
+        object.__setattr__(self, "model", inferred_model)
+        return self
 
 
-class TTSConfig(StrictModel):
-    provider: Literal["gradium"]
+class STTRegistryConfig(StrictModel):
+    active: str
+    providers: list[STTModelConfig]
+
+    @model_validator(mode="after")
+    def validate_registry(self) -> STTRegistryConfig:
+        ids = [item.id for item in self.providers]
+        if len(ids) != len(set(ids)):
+            raise ValueError("STT model IDs must be unique")
+        if self.active not in ids:
+            raise ValueError("voice.stt.active must reference a registered STT model")
+        return self
+
+    def ordered(self) -> list[STTModelConfig]:
+        active = next(item for item in self.providers if item.id == self.active)
+        return [active, *(item for item in self.providers if item.id != self.active)]
+
+
+class TTSModelConfig(StrictModel):
+    id: str
+    provider: Literal["gradium", "openai"] | None = None
     endpoint: str
     secret_env: str
-    voice_id_env: str
-    voice_id: str
-    model: str
-    output_format: str
+    voice_id_env: str = ""
+    voice_id: str = "marin"
+    model: str | None = None
+    output_format: str = "pcm_24000"
     temperature: float = Field(default=0.9, ge=0, le=1.4)
     cfg_coef: float = Field(default=2.2, ge=1, le=4)
     padding_bonus: float = Field(default=-0.5, ge=-4, le=4)
+    instructions: str = "Speak naturally and conversationally. Never read punctuation or markup aloud."
+
+    @model_validator(mode="after")
+    def resolve_reference(self) -> TTSModelConfig:
+        try:
+            inferred_provider, inferred_model = self.id.split("/", 1)
+        except ValueError as error:
+            raise ValueError("TTS model IDs must use provider/model") from error
+        if inferred_provider not in {"gradium", "openai"}:
+            raise ValueError(f"unsupported TTS provider: {inferred_provider}")
+        if self.provider is not None and self.provider != inferred_provider:
+            raise ValueError("TTS provider conflicts with its provider/model ID")
+        if self.model is not None and self.model != inferred_model:
+            raise ValueError("TTS model conflicts with its provider/model ID")
+        object.__setattr__(self, "provider", inferred_provider)
+        object.__setattr__(self, "model", inferred_model)
+        return self
+
+
+class TTSRegistryConfig(StrictModel):
+    active: str
+    providers: list[TTSModelConfig]
+
+    @model_validator(mode="after")
+    def validate_registry(self) -> TTSRegistryConfig:
+        ids = [item.id for item in self.providers]
+        if len(ids) != len(set(ids)):
+            raise ValueError("TTS model IDs must be unique")
+        if self.active not in ids:
+            raise ValueError("voice.tts.active must reference a registered TTS model")
+        return self
+
+    def ordered(self) -> list[TTSModelConfig]:
+        active = next(item for item in self.providers if item.id == self.active)
+        return [active, *(item for item in self.providers if item.id != self.active)]
 
 
 class VoiceConfig(StrictModel):
-    stt: STTConfig
-    tts: TTSConfig
+    stt: STTRegistryConfig
+    tts: TTSRegistryConfig
 
 
 class DecisionConfig(StrictModel):

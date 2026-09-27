@@ -8,7 +8,9 @@ from atlas.config import load_config
 
 
 async def main() -> None:
-    tts = GradiumTTS(load_config().voice.tts)
+    config = load_config()
+    gradium = next(item for item in config.voice.tts.providers if item.provider == "gradium")
+    tts = GradiumTTS(gradium)
     started = monotonic()
     first_chunk_ms: int | None = None
     chunk_count = 0

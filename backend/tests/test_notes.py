@@ -34,6 +34,14 @@ def test_notes_are_deduplicated_bounded_and_section_owned() -> None:
     assert normalized.current_work == ["Research verified sources (executing)"]
 
 
+def test_notes_reject_unknown_and_transcription_artifact_participants() -> None:
+    document = NotesDocument(
+        participants=["Pavel", "Ivan G", "Inconnu", "Allah Spéci", "Speaker 2", "Unknown"],
+    )
+    normalized = normalize_notes(document, [])
+    assert normalized.participants == ["Pavel", "Ivan G"]
+
+
 def test_notes_can_shrink_when_understanding_improves() -> None:
     verbose = NotesDocument(topics=[f"Repeated fragment {index}" for index in range(8)])
     concise = NotesDocument(synthesis=["The fragments resolve into one durable idea."])

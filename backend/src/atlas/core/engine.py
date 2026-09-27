@@ -342,10 +342,7 @@ class AtlasEngine:
 
     async def ingest_audio(self, audio: bytes) -> None:
         if self.state.session_status == SessionStatus.LISTENING:
-            if (
-                self.stt.connected
-                and monotonic() - self._stt_started_at >= self.config.voice.stt.rotate_after_seconds
-            ):
+            if self.stt.connected and monotonic() - self._stt_started_at >= self.stt.rotate_after_seconds:
                 await self.stt.stop()
             if self.stt.available and not self.stt.connected:
                 await self._start_stt()
@@ -1045,13 +1042,17 @@ class AtlasEngine:
             tts_task.add_done_callback(self._background.discard)
             tts_task.add_done_callback(self._speech_tasks.discard)
             required_gap = (
-                self.config.policy.direct_floor_gap_seconds
-                if speech.reason == "direct_address"
-                else self.config.policy.stable_floor_gap_seconds
+                self.config.policy.direct_floor_gap_seconds if speech.reason == "direct_address" else 0.6
             )
+            gap_timeout = 2.5 if speech.reason != "direct_address" else 4.0
+            start_wait = monotonic()
             while True:
                 quiet_for = monotonic() - self._last_floor_change
-                if not self.state.floor_busy and quiet_for >= required_gap:
+                elapsed = monotonic() - start_wait
+                # Speak after a natural gap, or after the bounded wait if the room is currently quiet.
+                if (not self.state.floor_busy and quiet_for >= required_gap) or (
+                    not self.state.floor_busy and elapsed >= gap_timeout
+                ):
                     break
                 if not self._session_accepts_results(self.state.session_id):
                     speech.status = "canceled"
@@ -1059,10 +1060,11 @@ class AtlasEngine:
                     tts_task.cancel()
                     return
                 await asyncio.sleep(0.05)
-            if speech.room_epoch != self.state.room_epoch:
+            # Requested results survive later room turns. Session closure still cancels them.
+            if not self._session_accepts_results(self.state.session_id):
                 tts_task.cancel()
                 speech.status = "canceled"
-                speech.error = "Room context changed before playback"
+                speech.error = "Session closed before playback"
                 await self._commit("speech.canceled", speech.error)
                 return
             first_chunk = await audio_queue.get()

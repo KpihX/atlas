@@ -9,7 +9,7 @@ from typing import Any
 import pytest
 
 from atlas.adapters.gradium import GradiumSTT, GradiumTTS
-from atlas.config import STTConfig, TTSConfig
+from atlas.config import STTModelConfig, TTSModelConfig
 
 
 class FakeWebSocket:
@@ -37,8 +37,9 @@ class FakeWebSocket:
         return messages()
 
 
-def tts_config() -> TTSConfig:
-    return TTSConfig(
+def tts_config() -> TTSModelConfig:
+    return TTSModelConfig(
+        id="gradium/default",
         provider="gradium",
         endpoint="wss://example.test",
         secret_env="GRADIUM_API_KEY",
@@ -53,7 +54,8 @@ def tts_config() -> TTSConfig:
 async def test_stt_accumulates_fragments_until_flush(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("GRADIUM_API_KEY", "test")
     stt = GradiumSTT(
-        STTConfig(
+        STTModelConfig(
+            id="gradium/default",
             provider="gradium",
             endpoint="wss://example.test",
             secret_env="GRADIUM_API_KEY",

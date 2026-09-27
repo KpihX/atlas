@@ -90,7 +90,7 @@ export class AudioBridge {
     silentMix.connect(this.context.destination);
     this.processor.onaudioprocess = (event) => this.processPcm(event.inputBuffer.getChannelData(0));
 
-    const floorStream = microphoneStream ?? systemStream;
+    const floorStream = microphoneStream;
     if (floorStream) {
       const floorSource = this.context.createMediaStreamSource(floorStream);
       this.floorProcessor = this.context.createScriptProcessor(2048, 1, 1);
@@ -285,8 +285,8 @@ export class AudioBridge {
     const rms = Math.sqrt(energy / input.length);
     this.onLevel(Math.min(1, rms / 0.12));
     const now = performance.now();
-    const threshold = this.playbackActive ? 0.045 : 0.018;
-    const requiredFrames = this.playbackActive ? 3 : 2;
+    const threshold = this.playbackActive ? 0.08 : 0.018;
+    const requiredFrames = this.playbackActive ? 6 : 2;
     if (rms > threshold) {
       this.voicedFrames += 1;
       this.lastEnergyAt = now;

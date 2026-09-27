@@ -16,7 +16,11 @@ from starlette.websockets import WebSocketDisconnected
 from atlas.adapters.exa import ExaSearch
 from atlas.adapters.gradium import GradiumSTT, GradiumTTS
 from atlas.adapters.jinko import JinkoFlights
+from atlas.adapters.openai_stt import OpenAISTT
+from atlas.adapters.openai_tts import OpenAITTS
 from atlas.adapters.sqlite import SQLiteStore
+from atlas.adapters.stt_registry import STTRegistry
+from atlas.adapters.tts_registry import TTSRegistry
 from atlas.adapters.typesafe import TypeSafeDecision
 from atlas.config import AppConfig, ProductConfig, load_config, load_product
 from atlas.core.coordinator import Coordinator
@@ -200,8 +204,16 @@ class Resources:
 def compose(product: ProductConfig, config: AppConfig, hub: WebSocketHub) -> Resources:
     generator = OpenAICompatibleGenerator(config.llm)
     decision = TypeSafeDecision(config.decision)
-    stt = GradiumSTT(config.voice.stt)
-    tts = GradiumTTS(config.voice.tts)
+    stt_providers = {
+        provider.id: GradiumSTT(provider) if provider.provider == "gradium" else OpenAISTT(provider)
+        for provider in config.voice.stt.providers
+    }
+    stt = STTRegistry(config.voice.stt, stt_providers)
+    tts_providers = {
+        provider.id: GradiumTTS(provider) if provider.provider == "gradium" else OpenAITTS(provider)
+        for provider in config.voice.tts.providers
+    }
+    tts = TTSRegistry(config.voice.tts, tts_providers)
     exa = ExaSearch(config.tools.exa)
     jinko = JinkoFlights(config.tools.jinko)
     tools = ToolRegistry(config.policy.research_max_concurrency)

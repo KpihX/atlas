@@ -22,11 +22,13 @@ async def transcribe(sentences: list[str], language: str) -> list[str]:
     async def on_event(_: str, __: dict[str, object]) -> None:
         pass
 
-    stt = GradiumSTT(config.voice.stt)
+    gradium_stt = next(item for item in config.voice.stt.providers if item.provider == "gradium")
+    gradium_tts = next(item for item in config.voice.tts.providers if item.provider == "gradium")
+    stt = GradiumSTT(gradium_stt)
     await stt.start(on_partial, on_final, on_event, language)
     results: list[str] = []
     for sentence in sentences:
-        pcm_tts = config.voice.tts.model_copy(update={"output_format": "pcm_24000"})
+        pcm_tts = gradium_tts.model_copy(update={"output_format": "pcm_24000"})
         audio = await GradiumTTS(pcm_tts).synthesize(sentence, language)
         pcm = base64.b64decode(audio.data_base64)
         for offset in range(0, len(pcm), 3840):

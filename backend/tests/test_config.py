@@ -27,3 +27,17 @@ def test_initial_tools_are_exa_and_jinko() -> None:
     config = AppConfig.model_validate(json.loads(default_config_text()))
     assert config.tools.exa.secret_env == "EXA_API_KEY"
     assert config.tools.jinko.secret_env == "JINKO_API_KEY"
+
+
+def test_voice_registries_use_openai_and_keep_gradium_switchable() -> None:
+    config = AppConfig.model_validate(json.loads(default_config_text()))
+    assert config.voice.stt.active == "gradium/default"
+    assert [item.id for item in config.voice.stt.ordered()] == [
+        "gradium/default",
+        "openai/gpt-4o-mini-transcribe",
+    ]
+    assert config.voice.tts.active == "gradium/default"
+    assert [item.id for item in config.voice.tts.ordered()] == [
+        "gradium/default",
+        "openai/gpt-4o-mini-tts",
+    ]
