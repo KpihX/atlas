@@ -6,6 +6,8 @@ import json
 import httpx
 from websockets.asyncio.client import ClientConnection, connect
 
+from atlas.config import load_product
+
 
 async def wait_type(websocket: ClientConnection, kind: str, timeout_seconds: float = 90) -> dict[str, object]:
     async with asyncio.timeout(timeout_seconds):
@@ -23,7 +25,7 @@ async def main() -> None:
             json.dumps(
                 {
                     "type": "client.hello",
-                    "protocol_version": 7,
+                    "protocol_version": load_product().protocol_version,
                     "client_id": "social-smoke",
                     "capabilities": {"audio_capture": False, "audio_playback": True},
                 }
@@ -33,7 +35,6 @@ async def main() -> None:
             json.dumps(
                 {
                     "type": "session.start",
-                    "assistant_name": "Assistant",
                     "language": "en",
                     "capture_mode": "microphone",
                     "output_mode": "local_only",
@@ -44,7 +45,7 @@ async def main() -> None:
             json.dumps(
                 {
                     "type": "transcript.inject",
-                    "text": "Assistant, explain the project naturally in enough detail to speak for a while.",
+                    "text": "Atlas, explain the project naturally in enough detail to speak for a while.",
                 }
             )
         )
@@ -58,7 +59,7 @@ async def main() -> None:
             json.dumps(
                 {
                     "type": "transcript.inject",
-                    "text": "Assistant, prepare another detailed spoken answer.",
+                    "text": "Atlas, prepare another detailed spoken answer.",
                 }
             )
         )

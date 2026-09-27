@@ -15,7 +15,7 @@ export function send(socket: WebSocket, message: ClientMessage): void {
   if (socket.readyState === WebSocket.OPEN) socket.send(JSON.stringify(message));
 }
 
-export async function renameMeetingSession(sessionId: string, title: string): Promise<void> {
+export async function renameAtlasSession(sessionId: string, title: string): Promise<void> {
   const response = await fetch(`/v1/sessions/${encodeURIComponent(sessionId)}`, {
     method: "PATCH",
     headers: { "Content-Type": "application/json" },
@@ -24,12 +24,12 @@ export async function renameMeetingSession(sessionId: string, title: string): Pr
   if (!response.ok) throw new Error(`Rename failed: ${response.status}`);
 }
 
-export async function deleteMeetingSession(sessionId: string): Promise<void> {
+export async function deleteAtlasSession(sessionId: string): Promise<void> {
   const response = await fetch(`/v1/sessions/${encodeURIComponent(sessionId)}`, { method: "DELETE" });
   if (!response.ok) throw new Error(`Delete failed: ${response.status}`);
 }
 
-export function exportMeetingSession(sessionId: string): void {
+export function exportAtlasSession(sessionId: string): void {
   const link = document.createElement("a");
   link.href = `/v1/sessions/${encodeURIComponent(sessionId)}/export`;
   link.download = `${sessionId}.md`;

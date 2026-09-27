@@ -1,6 +1,6 @@
-# Meeting Sidecar
+# Atlas
 
-A headless meeting agent with a replaceable browser client.
+An ambient collaboration system with a replaceable browser client.
 
 ## Run
 
@@ -17,7 +17,7 @@ whether the browser microphone is active and displays its live input level.
 
 Every saved session can be renamed, exported as Markdown, or deleted with confirmation. The live
 board is curated through explicit create/update/merge/delete operations, while a separate notes agent
-continuously rewrites one cumulative meeting document from only the newly heard lines.
+continuously updates concise structured shared memory from newly heard lines and verified work.
 
 The voice channel supports barge-in, spoken mute/unmute/end controls, adaptive floor timing and Opus
 playback. Ending or leaving a session cancels active audio, queued speech and in-flight synthesis.
@@ -31,15 +31,22 @@ Secrets live only in `backend/.env`; start from `backend/.env.example`.
 Adjustable runtime configuration is installed once at:
 
 ```text
-~/.config/meeting-sidecar/config.json
+~/.config/atlas/atlas.json
 ```
 
-Zen Muse is the development generator. Switch production to direct OpenAI by changing one value:
+Models are assigned per role with portable `provider/model` references:
 
 ```json
 {
   "llm": {
-    "active_model": "openai-gpt-5-6-luna"
+    "roles": {
+      "speaker": "openai/gpt-5-mini",
+      "worker": "openai/gpt-4.1-mini",
+      "notes": "openai/gpt-4.1-mini",
+      "board": "openai/gpt-4.1-mini",
+      "naming": "openai/gpt-4.1-nano",
+      "fallback": "opencode-zen/muse-spark-1.3"
+    }
   }
 }
 ```

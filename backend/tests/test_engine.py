@@ -1,31 +1,36 @@
+# pyright: reportPrivateUsage=false
 from __future__ import annotations
 
+import asyncio
 import base64
 import json
-from typing import Any
+from collections.abc import AsyncIterator
+from typing import Any, Literal
+from unittest.mock import AsyncMock
 
 import pytest
 
-from sidecar.config import AppConfig, ProductConfig, default_config_text
-from sidecar.core.coordinator import Coordinator
-from sidecar.core.engine import MeetingEngine
-from sidecar.core.models import (
+from atlas.config import AppConfig, ProductConfig, default_config_text
+from atlas.core.coordinator import Coordinator
+from atlas.core.engine import AtlasEngine
+from atlas.core.models import (
+    AtlasState,
     AudioResult,
     BoardOperation,
     Card,
     Decision,
     LLMResult,
-    MeetingState,
     ProcessStatus,
     SessionStatus,
     SessionSummary,
+    Speech,
 )
-from sidecar.core.speaker import SpeakerAgent
-from sidecar.core.tools import ToolRegistry
+from atlas.core.speaker import SpeakerAgent
+from atlas.core.tools import ToolRegistry, ToolSpec
 
 
 class MemoryStore:
-    states: dict[str, MeetingState]
+    states: dict[str, AtlasState]
 
     def __init__(self) -> None:
         self.states = {}
@@ -33,7 +38,7 @@ class MemoryStore:
     async def open(self) -> None:
         pass
 
-    async def load(self, session_id: str) -> MeetingState | None:
+    async def load(self, session_id: str) -> AtlasState | None:
         state = self.states.get(session_id)
         return state.model_copy(deep=True) if state else None
 
@@ -52,7 +57,7 @@ class MemoryStore:
             if state.session_id
         ]
 
-    async def save(self, state: MeetingState) -> None:
+    async def save(self, state: AtlasState) -> None:
         if state.session_id:
             self.states[state.session_id] = state.model_copy(deep=True)
 
@@ -66,18 +71,53 @@ class MemoryStore:
 class FakeDecision:
     available = True
 
-    async def evaluate(self, state: MeetingState, text: str) -> Decision:
-        return Decision(route="respond", addressed_probability=1, speech_value=2, timing="next_gap")
+    def __init__(
+        self,
+        route: Literal["ignore", "capture", "investigate", "respond", "act", "control"] = "respond",
+        addressed: bool = True,
+        initiative: Literal["none", "assigned", "proactive"] | None = None,
+    ) -> None:
+        self.route: Literal["ignore", "capture", "investigate", "respond", "act", "control"] = route
+        self.addressed = addressed
+        self.initiative: Literal["none", "assigned", "proactive"] = initiative or (
+            "assigned" if route in {"investigate", "act"} else "none"
+        )
+
+    async def evaluate(self, state: AtlasState, text: str) -> Decision:
+        return Decision(
+            route=self.route,
+            addressee="atlas" if self.addressed else "another_participant",
+            memory="capture",
+            initiative=self.initiative,
+            speech_depth="brief" if self.addressed else "silent",
+            timing="next_gap",
+        )
 
 
 class FakeGenerator:
     available = True
 
     async def generate(self, messages: list[dict[str, str]], model_id: str | None = None) -> LLMResult:
-        if messages[0]["content"].startswith("Give this evolving meeting"):
+        if "Give this evolving session" in messages[0]["content"]:
             return LLMResult(content="Answer Review", model="fake", provider="fake")
-        if messages[0]["content"].startswith("You maintain one living Markdown"):
-            return LLMResult(content="# Answer Review\n\n- Living notes", model="fake", provider="fake")
+        if "structured shared memory" in messages[0]["content"]:
+            return LLMResult(
+                content=json.dumps(
+                    {
+                        "synthesis": ["Living notes"],
+                        "participants": [],
+                        "topics": ["Answer review"],
+                        "hypotheses": [],
+                        "questions": [],
+                        "decisions": [],
+                        "actions": [],
+                        "current_work": [],
+                        "source_ids": [],
+                    }
+                ),
+                model="fake",
+                provider="fake",
+            )
         return LLMResult(
             content=json.dumps(
                 {
@@ -92,6 +132,66 @@ class FakeGenerator:
             model="fake",
             provider="fake",
         )
+
+    async def stream(self, messages: list[dict[str, str]], model_id: str | None = None) -> AsyncIterator[str]:
+        yield "Here is the answer."
+
+
+class SilentGenerator(FakeGenerator):
+    async def stream(self, messages: list[dict[str, str]], model_id: str | None = None) -> AsyncIterator[str]:
+        yield "<SILENT>"
+
+
+class ResearchGenerator(FakeGenerator):
+    async def generate(self, messages: list[dict[str, str]], model_id: str | None = None) -> LLMResult:
+        if "background missions" not in messages[0]["content"]:
+            return await super().generate(messages, model_id)
+        if any("TOOL_RESULT" in message["content"] for message in messages):
+            return LLMResult(
+                content=json.dumps(
+                    {
+                        "working": "Research integrated",
+                        "board_ops": [],
+                        "speech": "",
+                        "control": "none",
+                        "tool": None,
+                    }
+                ),
+                model="fake",
+                provider="fake",
+            )
+        return LLMResult(
+            content=json.dumps(
+                {
+                    "working": "Researching sources",
+                    "board_ops": [],
+                    "speech": "",
+                    "control": "none",
+                    "tool": {"name": "fake_search", "arguments": {"query": "situation"}},
+                }
+            ),
+            model="fake",
+            provider="fake",
+        )
+
+
+class BlockingGenerator(FakeGenerator):
+    def __init__(self) -> None:
+        self.started = asyncio.Event()
+
+    async def stream(self, messages: list[dict[str, str]], model_id: str | None = None) -> AsyncIterator[str]:
+        self.started.set()
+        await asyncio.Event().wait()
+        yield "unreachable"
+
+
+class SequenceDecision(FakeDecision):
+    def __init__(self, decisions: list[Decision]) -> None:
+        super().__init__()
+        self.decisions = decisions
+
+    async def evaluate(self, state: AtlasState, text: str) -> Decision:
+        return self.decisions.pop(0)
 
 
 class FakeSTT:
@@ -114,10 +214,37 @@ class FakeSTT:
 class FakeTTS:
     available = True
 
-    async def synthesize(self, text: str, language: str) -> AudioResult:
+    async def synthesize(
+        self,
+        text: str,
+        language: str,
+        padding_bonus: float | None = None,
+        temp: float | None = None,
+    ) -> AudioResult:
         return AudioResult(
             data_base64=base64.b64encode(b"\0\0").decode(), format="pcm_24000", sample_rate=24000
         )
+
+    async def stream(self, text: str, language: str, on_chunk: Any, on_text: Any = None) -> None:
+        if on_text is not None:
+            await on_text(text, 0.0, 0.1)
+        await on_chunk(b"\0\0", 24000, "pcm_24000")
+
+    async def stream_chunks(
+        self, text_chunks: AsyncIterator[str], language: str, on_chunk: Any, on_text: Any = None
+    ) -> None:
+        async for text in text_chunks:
+            if on_text is not None:
+                await on_text(text, 0.0, 0.1)
+            await on_chunk(b"\0\0", 24000, "pcm_24000")
+
+
+class FailingTTS(FakeTTS):
+    async def stream_chunks(
+        self, text_chunks: AsyncIterator[str], language: str, on_chunk: Any, on_text: Any = None
+    ) -> None:
+        async for _ in text_chunks:
+            raise RuntimeError("provider stream closed")
 
 
 class TrackingSTT(FakeSTT):
@@ -140,9 +267,40 @@ class TrackingSTT(FakeSTT):
         self.stops += 1
 
 
+def build_engine(
+    decision: FakeDecision,
+    generator: FakeGenerator,
+    published: list[dict[str, object]],
+    tts: Any | None = None,
+    tools: ToolRegistry | None = None,
+) -> AtlasEngine:
+    config = AppConfig.model_validate(json.loads(default_config_text()))
+    config = config.model_copy(
+        update={"session": config.session.model_copy(update={"notes_interval_seconds": 3600})}
+    )
+
+    async def publish(message: dict[str, object]) -> None:
+        published.append(message)
+
+    return AtlasEngine(
+        product=ProductConfig(
+            project_id="atlas", display_name="Atlas", companion_name="Atlas", protocol_version=1
+        ),
+        config=config,
+        store=MemoryStore(),
+        decision=decision,
+        speaker=SpeakerAgent(generator),
+        coordinator=Coordinator(generator, tools or ToolRegistry(1), config.policy, config.llm.roles),
+        stt=FakeSTT(),
+        tts=tts or FakeTTS(),
+        publish=publish,
+        tool_health={},
+    )
+
+
 def test_coordinator_accepts_zen_yaml_shape() -> None:
-    state = MeetingState(project_id="test", protocol_version=1)
-    decision = Decision(route="respond", addressed_probability=1)
+    state = AtlasState(project_id="test", protocol_version=1)
+    decision = Decision(route="respond", addressee="atlas")
     result = Coordinator._parse(
         "speech: Bonjour\ncard_title: Test\ncard_body: OK\ncard_kind: finding\nworking: Done\ntool: null",
         state,
@@ -153,8 +311,8 @@ def test_coordinator_accepts_zen_yaml_shape() -> None:
 
 
 def test_coordinator_ignores_empty_tool_name() -> None:
-    state = MeetingState(project_id="test", protocol_version=1)
-    decision = Decision(route="respond", addressed_probability=1)
+    state = AtlasState(project_id="test", protocol_version=1)
+    decision = Decision(route="respond", addressee="atlas")
     result = Coordinator._parse(
         '{"speech":"Bonjour","tool":{"name":"","arguments":{}}}',
         state,
@@ -180,9 +338,11 @@ async def test_direct_turn_reaches_card_and_authorized_speech() -> None:
         published.append(message)
 
     generator = FakeGenerator()
-    coordinator = Coordinator(generator, ToolRegistry(1), config.policy)
-    engine = MeetingEngine(
-        product=ProductConfig(project_id="test", protocol_version=1),
+    coordinator = Coordinator(generator, ToolRegistry(1), config.policy, config.llm.roles)
+    engine = AtlasEngine(
+        product=ProductConfig(
+            project_id="test", display_name="Atlas", companion_name="Atlas", protocol_version=1
+        ),
         config=config,
         store=MemoryStore(),
         decision=FakeDecision(),
@@ -194,11 +354,25 @@ async def test_direct_turn_reaches_card_and_authorized_speech() -> None:
         tool_health={},
     )
     await engine.start()
-    await engine.start_session({"assistant_name": "Assistant"})
+    await engine.start_session({})
+    cue = AsyncMock()
+    engine._publish_presence_cue = cue
+    worker_run = await engine._start_agent("worker", "Background research")
+    reporting_run = await engine._start_agent("speaker", "Background progress report")
+    await engine.drain()
+    cue.assert_not_awaited()
+    await engine._finish_agent(worker_run, "done")
+    await engine._finish_agent(reporting_run, "done")
     await engine.commit_utterance("Assistant, what is the answer?", source="manual")
     await engine.drain()
     assert engine.state.title == "Answer Review"
+    cue.assert_awaited_once()
+    subtitles = [message for message in published if message.get("type") == "speech.subtitle"]
+    assert any(message.get("text") == "Here is the answer." for message in subtitles)
+    assert any(message.get("start_s") == 0.0 and message.get("stop_s") == 0.1 for message in subtitles)
     assert any(message.get("type") == "speech.authorized" for message in published)
+    assert any(message.get("type") == "speech.audio.chunk" for message in published)
+    assert any(message.get("type") == "speech.audio.end" for message in published)
     await engine._write_notes()
     assert engine.state.notes_version == 1
     assert engine.state.notes_cursor == len(engine.state.transcript)
@@ -216,13 +390,15 @@ async def test_sessions_are_isolated_and_resumable() -> None:
         pass
 
     store = MemoryStore()
-    engine = MeetingEngine(
-        product=ProductConfig(project_id="test", protocol_version=1),
+    engine = AtlasEngine(
+        product=ProductConfig(
+            project_id="test", display_name="Atlas", companion_name="Atlas", protocol_version=1
+        ),
         config=config,
         store=store,
         decision=FakeDecision(),
         speaker=SpeakerAgent(FakeGenerator()),
-        coordinator=Coordinator(FakeGenerator(), ToolRegistry(1), config.policy),
+        coordinator=Coordinator(FakeGenerator(), ToolRegistry(1), config.policy, config.llm.roles),
         stt=FakeSTT(),
         tts=FakeTTS(),
         publish=publish,
@@ -280,13 +456,15 @@ async def test_stt_lifetime_follows_capture_session() -> None:
         pass
 
     stt = TrackingSTT()
-    engine = MeetingEngine(
-        product=ProductConfig(project_id="test", protocol_version=1),
+    engine = AtlasEngine(
+        product=ProductConfig(
+            project_id="test", display_name="Atlas", companion_name="Atlas", protocol_version=1
+        ),
         config=config,
         store=MemoryStore(),
         decision=FakeDecision(),
         speaker=SpeakerAgent(FakeGenerator()),
-        coordinator=Coordinator(FakeGenerator(), ToolRegistry(1), config.policy),
+        coordinator=Coordinator(FakeGenerator(), ToolRegistry(1), config.policy, config.llm.roles),
         stt=stt,
         tts=FakeTTS(),
         publish=publish,
@@ -303,4 +481,278 @@ async def test_stt_lifetime_follows_capture_session() -> None:
     assert stt.languages == ["en", "fr"]
     await engine.client_disconnected()
     assert stt.stops == 2
+    await engine.stop()
+
+
+@pytest.mark.asyncio
+async def test_capture_turn_does_not_start_worker_or_speaker() -> None:
+    published: list[dict[str, object]] = []
+    engine = build_engine(FakeDecision(route="capture", addressed=False), FakeGenerator(), published)
+    await engine.start()
+    await engine.start_session({})
+    await engine.commit_utterance("Maybe we could", source="manual")
+    await engine.drain()
+    assert not any(run.agent in {"worker", "speaker"} for run in engine.state.agent_runs)
+    assert not any(message.get("type") == "speech.authorized" for message in published)
+    await engine.stop()
+
+
+@pytest.mark.asyncio
+async def test_response_to_another_person_does_not_start_speaker() -> None:
+    published: list[dict[str, object]] = []
+    engine = build_engine(FakeDecision(route="respond", addressed=False), FakeGenerator(), published)
+    await engine.start()
+    await engine.start_session({})
+    await engine.commit_utterance("Pavel, what do you think?", source="manual")
+    await engine.drain()
+    assert not any(run.agent == "speaker" for run in engine.state.agent_runs)
+    assert not any(message.get("type") == "speech.authorized" for message in published)
+    await engine.stop()
+
+
+@pytest.mark.asyncio
+async def test_response_offered_to_room_can_start_speaker_as_a_room_member() -> None:
+    published: list[dict[str, object]] = []
+    decision = SequenceDecision(
+        [
+            Decision(
+                route="respond",
+                addressee="room",
+                memory="capture",
+                speech_depth="brief",
+                timing="next_gap",
+            )
+        ]
+    )
+    engine = build_engine(decision, FakeGenerator(), published)
+    await engine.start()
+    await engine.start_session({})
+    await engine.commit_utterance("What does everyone think?", source="manual")
+    await engine.drain()
+    assert any(run.agent == "speaker" for run in engine.state.agent_runs)
+    await engine.stop()
+
+
+@pytest.mark.asyncio
+async def test_speaker_second_stage_veto_suppresses_audio() -> None:
+    published: list[dict[str, object]] = []
+    engine = build_engine(FakeDecision(route="respond", addressed=True), SilentGenerator(), published)
+    await engine.start()
+    await engine.start_session({})
+    await engine.commit_utterance("Atlas is an interesting name.", source="manual")
+    await engine.drain()
+    assert any(speech.status == "suppressed" for speech in engine.state.speeches)
+    assert not any(message.get("type") == "speech.authorized" for message in published)
+    await engine.stop()
+
+
+@pytest.mark.asyncio
+async def test_addressed_research_runs_speaker_and_worker_in_parallel() -> None:
+    published: list[dict[str, object]] = []
+    tools = ToolRegistry(1)
+
+    async def fake_search(arguments: dict[str, Any]) -> dict[str, Any]:
+        return {"status": "ok", "query": arguments["query"], "results": [{"title": "Source"}]}
+
+    tools.register(
+        ToolSpec(
+            name="fake_search",
+            description="Search test sources",
+            input_schema={"query": "string"},
+            effect="read",
+            handler=fake_search,
+        )
+    )
+    engine = build_engine(
+        FakeDecision(route="investigate", addressed=True), ResearchGenerator(), published, tools=tools
+    )
+    await engine.start()
+    await engine.start_session({})
+    await engine.commit_utterance("Atlas, research the current situation.", source="manual")
+    await engine.drain()
+    agents = {run.agent for run in engine.state.agent_runs}
+    assert {"speaker", "worker"}.issubset(agents)
+    assert engine.state.tasks[-1].phase == "complete"
+    assert engine.state.tasks[-1].status == "done"
+    await engine.stop()
+
+
+@pytest.mark.asyncio
+async def test_proactive_semantic_investigation_runs_worker_without_assignment_ack() -> None:
+    published: list[dict[str, object]] = []
+    tools = ToolRegistry(1)
+
+    async def fake_search(arguments: dict[str, Any]) -> dict[str, Any]:
+        return {"status": "ok", "query": arguments["query"], "results": [{"title": "Evidence"}]}
+
+    tools.register(
+        ToolSpec(
+            name="fake_search",
+            description="Search test sources",
+            input_schema={"query": "string"},
+            effect="read",
+            handler=fake_search,
+        )
+    )
+    decision = SequenceDecision(
+        [
+            Decision(
+                route="investigate",
+                addressee="room",
+                memory="capture",
+                initiative="proactive",
+                speech_depth="silent",
+                timing="later",
+            )
+        ]
+    )
+    engine = build_engine(decision, ResearchGenerator(), published, tools=tools)
+    await engine.start()
+    await engine.start_session({})
+    await engine.commit_utterance(
+        "This assumption could invalidate the plan if the external facts differ.",
+        source="manual",
+    )
+    await engine.drain()
+    assert any(run.agent == "worker" for run in engine.state.agent_runs)
+    assert engine.state.tasks[-1].status == "done"
+    assert not any(speech.reason == "task_started" for speech in engine.state.speeches)
+    await engine.stop()
+
+
+@pytest.mark.asyncio
+async def test_new_room_turn_cancels_stale_direct_speech() -> None:
+    published: list[dict[str, object]] = []
+    generator = BlockingGenerator()
+    decision = SequenceDecision(
+        [
+            Decision(
+                route="respond",
+                addressee="atlas",
+                memory="capture",
+                speech_depth="normal",
+                timing="next_gap",
+            ),
+            Decision(
+                route="ignore",
+                addressee="another_participant",
+                speech_depth="silent",
+                timing="silent",
+            ),
+        ]
+    )
+    engine = build_engine(decision, generator, published)
+    await engine.start()
+    await engine.start_session({})
+    await engine.commit_utterance("Atlas, explain the situation.", source="manual")
+    await asyncio.wait_for(generator.started.wait(), timeout=1)
+    await engine.commit_utterance("No, I am talking to Pavel.", source="manual")
+    await engine.drain()
+    assert any(run.agent == "speaker" and run.status == "canceled" for run in engine.state.agent_runs)
+    assert not any(message.get("type") == "speech.authorized" for message in published)
+    await engine.stop()
+
+
+@pytest.mark.asyncio
+async def test_tts_failure_terminates_speech_and_releases_playback() -> None:
+    published: list[dict[str, object]] = []
+    engine = build_engine(
+        FakeDecision(route="respond", addressed=True), FakeGenerator(), published, FailingTTS()
+    )
+    await engine.start()
+    await engine.start_session({})
+    await engine.commit_utterance("Atlas, give me the result.", source="manual")
+    await engine.drain()
+    speech = engine.state.speeches[-1]
+    assert speech.status == "failed"
+    assert speech.error and "provider stream closed" in speech.error
+    assert engine.state.health["tts"].status == "down"
+    assert engine._active_speech_id is None
+    assert engine._playback_idle.is_set()
+    assert any(message.get("type") == "speech.audio.end" for message in published)
+    await engine.stop()
+
+
+@pytest.mark.asyncio
+async def test_requested_result_tts_failure_never_leaves_phantom_voice_active() -> None:
+    published: list[dict[str, object]] = []
+    engine = build_engine(
+        FakeDecision(route="capture", addressed=False), FakeGenerator(), published, FailingTTS()
+    )
+    await engine.start()
+    await engine.start_session({})
+    speech = Speech(
+        text="The research result is ready.",
+        reason="requested_result",
+        room_epoch=engine.state.room_epoch,
+    )
+    await engine._deliver(speech)
+    assert speech.status == "failed"
+    assert speech.error and "provider stream closed" in speech.error
+    assert not any(message.get("type") == "speech.authorized" for message in published)
+    assert engine._active_speech_id is None
+    assert engine._playback_idle.is_set()
+    await engine.stop()
+
+
+@pytest.mark.asyncio
+async def test_research_mission_fails_truthfully_when_no_tool_is_selected() -> None:
+    published: list[dict[str, object]] = []
+    engine = build_engine(FakeDecision(route="investigate", addressed=True), FakeGenerator(), published)
+    await engine.start()
+    await engine.start_session({})
+    await engine.commit_utterance("Atlas, research the evidence.", source="manual")
+    await engine.drain()
+    mission = engine.state.tasks[-1]
+    assert mission.status == "failed"
+    assert mission.phase == "complete"
+    assert mission.error == "No registered research tool was selected"
+    await engine.stop()
+
+
+@pytest.mark.asyncio
+async def test_board_keeps_distinct_concepts_and_updates_matching_identity() -> None:
+    published: list[dict[str, object]] = []
+    engine = build_engine(FakeDecision(route="capture", addressed=False), FakeGenerator(), published)
+    await engine.start()
+    await engine.start_session({})
+    await engine._apply_board_operations(
+        [
+            BoardOperation(
+                action="create",
+                concept_key="expert-validation-gap",
+                kind="finding",
+                title="Expert validation gap",
+                body="Crisis workflows require domain expert review.",
+            ),
+            BoardOperation(
+                action="create",
+                concept_key="education-pivot",
+                kind="idea",
+                title="Education-domain pivot",
+                body="The architecture may transfer to education coordination.",
+            ),
+        ],
+        "utt_source",
+    )
+    await engine._apply_board_operations(
+        [
+            BoardOperation(
+                action="create",
+                concept_key="expert-validation-gap",
+                kind="finding",
+                title="Expert validation remains required",
+                body="Experts must validate procedures and failure points.",
+            )
+        ],
+        "utt_update",
+    )
+    assert len(engine.state.cards) == 2
+    assert {card.concept_key for card in engine.state.cards} == {
+        "expert-validation-gap",
+        "education-pivot",
+    }
+    expert = next(card for card in engine.state.cards if card.concept_key == "expert-validation-gap")
+    assert expert.title == "Expert validation remains required"
+    assert expert.source_ids == ["utt_source", "utt_update"]
     await engine.stop()

@@ -1,0 +1,1375 @@
+from __future__ import annotations
+
+import asyncio
+import base64
+import logging
+from collections.abc import AsyncIterator
+from contextlib import suppress
+from time import monotonic
+from typing import Any, Literal, cast
+
+from atlas.config import AppConfig, ProductConfig
+from atlas.languages import ATLAS_LANGUAGES, AtlasLanguage
+
+from .coordinator import Coordinator
+from .models import (
+    Activity,
+    AgentRun,
+    AtlasState,
+    BoardOperation,
+    Card,
+    Decision,
+    DecisionRecord,
+    Health,
+    ProcessStatus,
+    SessionStatus,
+    SessionSummary,
+    Speech,
+    Task,
+    Utterance,
+    new_id,
+    now_iso,
+)
+from .notes import integrate_task_finding, normalize_notes, render_notes
+from .ports import DecisionPort, Publish, StorePort, STTPort, TTSPort
+from .speaker import SpeakerAgent
+from .speech import SpeechGate
+from .voice import spoken_segments, spoken_text
+
+logger = logging.getLogger("uvicorn.error").getChild("pipeline")
+
+
+class AtlasEngine:
+    def __init__(
+        self,
+        *,
+        product: ProductConfig,
+        config: AppConfig,
+        store: StorePort,
+        decision: DecisionPort,
+        speaker: SpeakerAgent,
+        coordinator: Coordinator,
+        stt: STTPort,
+        tts: TTSPort,
+        publish: Publish,
+        tool_health: dict[str, bool],
+    ) -> None:
+        self.product = product
+        self.config = config
+        self.store = store
+        self.decision = decision
+        self.speaker = speaker
+        self.coordinator = coordinator
+        self.stt = stt
+        self.tts = tts
+        self.publish = publish
+        self.tool_health = tool_health
+        self.state = self._new_state()
+        self._gate = SpeechGate(config.policy)
+        self._turn_lock = asyncio.Lock()
+        self._notes_lock = asyncio.Lock()
+        self._naming_lock = asyncio.Lock()
+        self._maintenance_lock = asyncio.Lock()
+        self._speech_lock = asyncio.Lock()
+        self._playback_idle = asyncio.Event()
+        self._playback_idle.set()
+        self._active_speech_id: str | None = None
+        self._presence_audio: dict[str, dict[str, object]] = {}
+        self._notes_dirty = False
+        self._notes_kick = asyncio.Event()
+        self._notes_task: asyncio.Task[None] | None = None
+        self._background: set[asyncio.Task[Any]] = set()
+        self._speech_tasks: set[asyncio.Task[Any]] = set()
+        self._direct_speech_task: asyncio.Task[Any] | None = None
+        self._direct_speech_epoch = 0
+        self._last_floor_change = monotonic()
+        self._floor_changed_event = asyncio.Event()
+        self._stt_started_at = 0.0
+        self._agent_started: dict[str, float] = {}
+        self._last_curated_signature: tuple[str | None, tuple[tuple[str, ...], ...]] | None = None
+
+    async def start(self) -> None:
+        await self.store.open()
+        self.state.process_status = ProcessStatus.READY
+        self._set_health()
+        self._notes_task = asyncio.create_task(self._notes_loop())
+        await self._commit("runtime", "Backend ready")
+        self._spawn(self._prewarm_presence_cue())
+
+    async def stop(self) -> None:
+        self.state.process_status = ProcessStatus.SHUTTING_DOWN
+        await self._broadcast_state()
+        if self._notes_task is not None:
+            self._notes_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await self._notes_task
+        for task in tuple(self._background):
+            task.cancel()
+        if self._background:
+            await asyncio.gather(*self._background, return_exceptions=True)
+        await self.stt.stop()
+        close_decision = getattr(self.decision, "close", None)
+        if close_decision is not None:
+            await close_decision()
+        close_generator = getattr(self.coordinator.generator, "close", None)
+        if close_generator is not None:
+            await close_generator()
+        self.state.process_status = ProcessStatus.STOPPED
+        await self.store.save(self.state)
+        await self.store.close()
+
+    async def start_session(self, payload: dict[str, Any]) -> None:
+        await self._prepare_session_switch()
+        self.state = self._new_state()
+        self.state.process_status = ProcessStatus.READY
+        self._set_health()
+        self.state.session_status = SessionStatus.STARTING
+        self.state.session_id = new_id("session")
+        self.state.identity_name = self.product.companion_name
+        language = payload.get("language")
+        self.state.language = language if language in ATLAS_LANGUAGES else self.config.session.language
+        capture = payload.get("capture_mode", "mixed")
+        output = payload.get("output_mode", "local_only")
+        self.state.capture_mode = capture if capture in {"microphone", "system", "mixed"} else "mixed"
+        self.state.output_mode = (
+            output if output in {"local_only", "room_speaker", "meeting_injected"} else "local_only"
+        )
+        await self._start_stt()
+        self.state.session_status = SessionStatus.LISTENING
+        await self._commit("session", "Listening started")
+
+    async def open_session(self, session_id: str) -> bool:
+        restored = await self.store.load(session_id)
+        if restored is None:
+            return False
+        await self._prepare_session_switch()
+        self.state = restored
+        self.state.voice_mode = "active"
+        for run in self.state.agent_runs:
+            if run.status == "running":
+                run.status = "failed"
+                run.error = "process_restarted"
+                run.completed_at = now_iso()
+        for task in self.state.tasks:
+            if task.status in {"queued", "running"}:
+                task.status = "failed"
+                task.error = "process_restarted"
+                task.completed_at = now_iso()
+        self.state.working = ""
+        self.state.process_status = ProcessStatus.READY
+        self.state.session_status = SessionStatus.PAUSED
+        self._set_health()
+        self._notes_dirty = len(self.state.transcript) > self.state.notes_cursor
+        if self._notes_dirty:
+            self._notes_kick.set()
+        await self._commit("session", "Session opened")
+        if self.state.title_version == 0 or len(self.state.transcript) - self.state.title_cursor >= 8:
+            self._spawn(self._rename_session())
+        return True
+
+    async def list_sessions(self) -> list[SessionSummary]:
+        return await self.store.list_sessions()
+
+    def client_state(self) -> AtlasState:
+        state = self.state.model_copy(deep=True)
+        for task in state.tasks:
+            if not isinstance(task.result, dict):
+                continue
+            results_value: object = task.result.get("results")
+            if isinstance(results_value, list):
+                results = cast(list[object], results_value)
+                sources: list[dict[str, object]] = []
+                for item_value in results:
+                    if not isinstance(item_value, dict):
+                        continue
+                    item = cast(dict[str, object], item_value)
+                    sources.append({"title": item.get("title", ""), "url": item.get("url", "")})
+                task.result = {
+                    "status": task.result.get("status"),
+                    "request_id": task.result.get("request_id"),
+                    "result_count": len(results),
+                    "sources": sources,
+                }
+        return state
+
+    async def rename_session(self, session_id: str, title: str) -> bool:
+        cleaned = " ".join(title.split()).strip()[:80]
+        if not cleaned:
+            return False
+        state = self.state if self.state.session_id == session_id else await self.store.load(session_id)
+        if state is None:
+            return False
+        state.title = cleaned
+        state.updated_at = now_iso()
+        await self.store.save(state)
+        if self.state.session_id == session_id:
+            await self._commit("session.renamed", cleaned)
+        else:
+            await self._broadcast_state()
+        return True
+
+    async def delete_session(self, session_id: str) -> bool:
+        if self.state.session_id == session_id:
+            await self._prepare_session_switch()
+            deleted = await self.store.delete(session_id)
+            self.state = self._new_state()
+            self.state.process_status = ProcessStatus.READY
+            self._set_health()
+            await self._activity("session.deleted", session_id)
+            await self._broadcast_state()
+            return deleted
+        deleted = await self.store.delete(session_id)
+        if deleted:
+            await self._broadcast_state()
+        return deleted
+
+    async def export_session(self, session_id: str) -> str | None:
+        state = self.state if self.state.session_id == session_id else await self.store.load(session_id)
+        if state is None:
+            return None
+        cards = "\n".join(f"### {card.title}\n\n{card.body}\n" for card in state.cards) or "_No cards._\n"
+        transcript = (
+            "\n".join(f"- [{item.id}] {item.speaker}: {item.text}" for item in state.transcript)
+            or "_No transcript._"
+        )
+        tasks = (
+            "\n".join(
+                f"- [{item.status}] {item.tool}: {item.summary}"
+                + (
+                    "\n  "
+                    + "\n  ".join(
+                        f"- {result.get('title', 'Source')}: {result.get('url', '')}"
+                        for result in cast(list[dict[str, object]], item.result.get("results", []))
+                    )
+                    if isinstance(item.result, dict) and isinstance(item.result.get("results"), list)
+                    else ""
+                )
+                for item in state.tasks
+            )
+            or "_No tool runs._"
+        )
+        agents = (
+            "\n".join(f"- [{item.status}] {item.agent}: {item.summary}" for item in state.agent_runs)
+            or "_No agent runs._"
+        )
+        return (
+            f"# {state.title}\n\n"
+            f"Created: {state.created_at}\n\n"
+            f"## Live Notes\n\n{state.notes or '_No notes._'}\n\n"
+            f"## Board\n\n{cards}\n"
+            f"## Agents\n\n{agents}\n\n"
+            f"## Research and Tools\n\n{tasks}\n\n"
+            f"## Transcript\n\n{transcript}\n"
+        )
+
+    async def curate_board(self, *, force: bool = True) -> None:
+        async with self._maintenance_lock:
+            session_id = self.state.session_id
+            snapshot = self.state.model_copy(deep=True)
+            signature = (session_id, self._board_memory_signature(snapshot.notes_document))
+            if not force and signature == self._last_curated_signature:
+                return
+            agent_run = await self._start_agent("coordinator", "Consolidating the board")
+            try:
+                operations = await self.coordinator.curate_board(snapshot)
+                if self.state.session_id == session_id:
+                    async with self._turn_lock:
+                        await self._apply_board_operations(operations, "")
+                        self._last_curated_signature = signature
+                        await self._finish_agent(agent_run, "done")
+                        await self._commit("board.curated", f"Applied {len(operations)} board operations")
+                else:
+                    await self._finish_agent(agent_run, "failed", "session_changed")
+            except Exception as error:
+                await self._finish_agent(agent_run, "failed", type(error).__name__)
+                await self._commit("error", f"Board curation failed: {type(error).__name__}")
+
+    async def session_command(self, command: str) -> None:
+        if command == "pause" and self.state.session_status == SessionStatus.LISTENING:
+            await self._cancel_speech_tasks()
+            await self._interrupt_playback("session_paused")
+            if self.state.notes_cursor < len(self.state.transcript):
+                self._notes_dirty = True
+                await self._write_notes()
+            self.state.session_status = SessionStatus.PAUSED
+            await self.stt.stop()
+            self.state.health["stt"] = Health(status="standby", detail="Paused with the session")
+            await self._commit("session", "Listening paused")
+        elif command == "resume" and self.state.session_status == SessionStatus.PAUSED:
+            await self._start_stt()
+            self.state.session_status = SessionStatus.LISTENING
+            await self._commit("session", "Listening resumed")
+        elif command == "stop" and self.state.session_status not in {
+            SessionStatus.IDLE,
+            SessionStatus.CLOSED,
+        }:
+            await self._cancel_speech_tasks()
+            await self._interrupt_playback("session_ended")
+            self.state.session_status = SessionStatus.FINALIZING
+            await self.stt.stop()
+            if self.state.notes_cursor < len(self.state.transcript):
+                self._notes_dirty = True
+            if self._notes_dirty:
+                await self._write_notes()
+            await self._rename_session(force=True)
+            self.state.session_status = SessionStatus.CLOSED
+            await self._commit("session", "Session closed")
+
+    async def set_language(self, language: AtlasLanguage) -> None:
+        if language == self.state.language:
+            return
+        listening = self.state.session_status == SessionStatus.LISTENING
+        if listening:
+            await self.stt.stop()
+        self.state.language = language
+        self.state.partial = ""
+        self.state.notes = render_notes(self.state.notes_document, language)
+        if listening:
+            await self._start_stt()
+        await self._commit("session.language", language)
+
+    async def set_voice_mode(self, mode: Literal["active", "muted"]) -> None:
+        self.state.voice_mode = mode
+        await self._commit(f"voice.{mode}", f"Voice mode is {mode}")
+
+    async def client_disconnected(self) -> None:
+        await self._interrupt_playback("client_disconnected")
+        if self.state.session_status == SessionStatus.LISTENING:
+            self.state.session_status = SessionStatus.PAUSED
+            await self.stt.stop()
+            self.state.health["stt"] = Health(status="standby", detail="Capture client disconnected")
+            await self._commit("session", "Capture client disconnected; session paused")
+
+    async def ingest_audio(self, audio: bytes) -> None:
+        if self.state.session_status == SessionStatus.LISTENING:
+            if (
+                self.stt.connected
+                and monotonic() - self._stt_started_at >= self.config.voice.stt.rotate_after_seconds
+            ):
+                await self.stt.stop()
+            if self.stt.available and not self.stt.connected:
+                await self._start_stt()
+            self.state.pipeline.audio_frames += 1
+            self.state.pipeline.audio_bytes += len(audio)
+            self.state.pipeline.last_audio_at = now_iso()
+            try:
+                await self.stt.send(audio)
+            except Exception as error:
+                logger.warning("stt.reconnect error=%s", type(error).__name__)
+                self.state.health["stt"] = Health(status="degraded", detail="Reconnecting live stream")
+                await self.stt.stop()
+                await self._start_stt()
+                await self.stt.send(audio)
+            if self.state.pipeline.audio_frames % 12 == 0:
+                logger.info(
+                    "audio.received frames=%d bytes=%d",
+                    self.state.pipeline.audio_frames,
+                    self.state.pipeline.audio_bytes,
+                )
+                await self._broadcast_state()
+
+    async def on_partial(self, text: str) -> None:
+        self.state.partial = text
+        await self.publish({"type": "transcript.partial", "text": text})
+
+    async def on_stt_event(self, kind: str, detail: dict[str, object]) -> None:
+        self.state.pipeline.stt_messages += 1
+        self.state.pipeline.stt_last_event = kind
+        if kind == "text":
+            self.state.pipeline.stt_fragments += 1
+            self.state.pipeline.stt_last_fragment = str(detail.get("text", ""))
+        probability = detail.get("inactivity_probability")
+        if isinstance(probability, int | float):
+            self.state.pipeline.stt_inactivity_probability = float(probability)
+        if kind == "error":
+            self.state.health["stt"] = Health(status="down", detail=str(detail)[:180])
+            await self._broadcast_state()
+
+    async def commit_utterance(self, text: str, source: str = "audio") -> None:
+        cleaned = " ".join(text.split()).strip()
+        if not cleaned or self.state.session_status != SessionStatus.LISTENING:
+            return
+        utterance = Utterance(text=cleaned, source=source, language=self.state.language)
+        self.state.room_epoch += 1
+        room_epoch = self.state.room_epoch
+        self.state.partial = ""
+        self.state.transcript.append(utterance)
+        if source == "audio":
+            self.state.pipeline.stt_turns += 1
+        self.state.transcript = self.state.transcript[-500:]
+        logger.info("transcript.committed source=%s text=%r", source, cleaned)
+        await self._commit("heard", cleaned)
+        if (
+            self.state.title == "Nouvelle session"
+            or len(self.state.transcript) - self.state.title_cursor >= 8
+        ):
+            self._spawn(self._rename_session())
+        self._spawn(self._process_turn(utterance, room_epoch))
+
+    async def floor_changed(self, busy: bool) -> None:
+        if self.state.floor_busy == busy:
+            return
+        self.state.floor_busy = busy
+        self._last_floor_change = monotonic()
+        self._floor_changed_event.set()
+        if busy:
+            await self._cancel_direct_speech("barge_in")
+            for speech in reversed(self.state.speeches):
+                if speech.status in {"authorized", "playing"}:
+                    speech.status = "interrupted"
+                    self._active_speech_id = None
+                    self._playback_idle.set()
+                    await self.publish({"type": "speech.stop", "speech_id": speech.id, "reason": "barge_in"})
+                    break
+        else:
+            await self.stt.flush()
+        await self._broadcast_state()
+
+    async def playback_changed(self, speech_id: str, status: str) -> None:
+        speech = next((item for item in self.state.speeches if item.id == speech_id), None)
+        if speech is None or status not in {"playing", "finished", "interrupted"}:
+            return
+        if speech.status in {"failed", "canceled", "suppressed", "expired"}:
+            return
+        speech.status = status  # type: ignore[assignment]
+        if status in {"finished", "interrupted"} and self._active_speech_id == speech_id:
+            self._active_speech_id = None
+            self._playback_idle.set()
+        await self._commit("playback", f"{status}: {speech.text}")
+
+    async def _interrupt_playback(self, reason: str) -> None:
+        speech_id = self._active_speech_id
+        if speech_id is None:
+            return
+        speech = next((item for item in self.state.speeches if item.id == speech_id), None)
+        if speech is not None:
+            speech.status = "interrupted"
+        self._active_speech_id = None
+        self._playback_idle.set()
+        await self.publish({"type": "speech.stop", "speech_id": speech_id, "reason": reason})
+
+    async def drain(self) -> None:
+        while self._background:
+            await asyncio.gather(*tuple(self._background), return_exceptions=True)
+
+    async def _process_turn(self, utterance: Utterance, room_epoch: int) -> None:
+        session_id = self.state.session_id
+        decision_state = self.state.model_copy(deep=True)
+        try:
+            decision = await self.decision.evaluate(decision_state, utterance.text)
+        except Exception as error:
+            await self._commit("error", f"Decision failed: {type(error).__name__}")
+            return
+        if self.state.session_id != session_id or self.state.session_status == SessionStatus.CLOSED:
+            return
+        self.state.pipeline.decisions += 1
+        self.state.decisions.append(
+            DecisionRecord(
+                utterance_id=utterance.id,
+                context={
+                    "identity_name": decision_state.identity_name,
+                    "new_utterance": utterance.text,
+                    "recent_transcript": [item.text for item in decision_state.transcript[-8:]],
+                    "current_notes": decision_state.notes,
+                    "running_tasks": [
+                        item.summary for item in decision_state.tasks if item.status == "running"
+                    ],
+                },
+                result=decision,
+            )
+        )
+        self.state.decisions = self.state.decisions[-100:]
+        logger.info(
+            "decision route=%s addressee=%s initiative=%s timing=%s",
+            decision.route,
+            decision.addressee,
+            decision.initiative,
+            decision.timing,
+        )
+        self.state.health["decision"] = Health(
+            status="ok" if decision.rationale.startswith("Jev") else "degraded",
+            detail=decision.rationale,
+        )
+        await self._activity("decided", f"{decision.route}: {decision.rationale}")
+        await self._broadcast_state()
+
+        await self._cancel_direct_speech("new_room_turn")
+        if decision.memory == "capture" or decision.route in {
+            "investigate",
+            "act",
+            "control",
+        }:
+            self._notes_dirty = True
+            self._notes_kick.set()
+
+        addressed_strictly = decision.addressee in {"atlas", "room"}
+        mission_authorized = decision.route in {"investigate", "act"}
+        if (
+            addressed_strictly
+            and decision.speech_depth != "silent"
+            and decision.route in {"respond", "control"}
+        ):
+            task = self._spawn(self._speaker_turn(utterance, decision, session_id, room_epoch), speech=True)
+            self._direct_speech_task = task
+            self._direct_speech_epoch = room_epoch
+
+        mission_task: Task | None = None
+        if mission_authorized:
+            mission_task = Task(
+                tool="pending_selection",
+                summary=utterance.text,
+                status="queued",
+                phase="queued",
+            )
+            await self._upsert_task(mission_task, report=False)
+            if decision.initiative == "assigned":
+                self._spawn(self._acknowledge_mission(mission_task, session_id), speech=True)
+
+        if decision.route in {"ignore", "capture", "respond", "control"}:
+            return
+        if not mission_authorized:
+            return
+
+        async with self._turn_lock:
+            agent_run: AgentRun | None = None
+            try:
+                if not self._session_accepts_results(session_id):
+                    return
+                agent_run = await self._start_agent("worker", f"Processing: {utterance.text[:80]}")
+                if mission_task is None:
+                    return
+                mission_task.status = "running"
+                mission_task.phase = "planning"
+                await self._upsert_task(mission_task, report=False)
+                result = await self.coordinator.run(
+                    self.state, decision, on_task=self._upsert_task, mission_task=mission_task
+                )
+                if not self._session_accepts_results(session_id):
+                    await self._finish_agent(agent_run, "failed", "session_closed")
+                    return
+                self.state.pipeline.agent_runs += 1
+                logger.info(
+                    "agent.completed working=%r board_ops=%d speech=%s",
+                    result.working,
+                    len(result.board_ops),
+                    bool(result.speech),
+                )
+                if self.coordinator.generator.available:
+                    self.state.health["generator"] = Health(status="ok")
+                self.state.working = result.working
+                mission_succeeded = mission_task.error is None
+                if mission_succeeded:
+                    mission_task.phase = "integrating"
+                    await self._upsert_task(mission_task, report=False)
+                await self._apply_board_operations(result.board_ops, utterance.id)
+                await self._finish_agent(agent_run, "done")
+                await self._commit("worker", result.working or "Turn completed")
+                if mission_succeeded:
+                    mission_task.phase = "reporting"
+                    await self._upsert_task(mission_task, report=False)
+                await self._speaker_task(mission_task, session_id)
+                if mission_succeeded:
+                    mission_task.status = "done"
+                    mission_task.phase = "complete"
+                    mission_task.completed_at = now_iso()
+                    await self._upsert_task(mission_task, report=False)
+            except Exception as error:
+                self.state.working = ""
+                if agent_run is not None:
+                    await self._finish_agent(agent_run, "failed", type(error).__name__)
+                await self._commit("error", f"Worker failed: {type(error).__name__}")
+
+    def _session_accepts_results(self, session_id: str | None) -> bool:
+        return self.state.session_id == session_id and self.state.session_status != SessionStatus.CLOSED
+
+    async def _speaker_turn(
+        self, utterance: Utterance, decision: Decision, session_id: str | None, room_epoch: int
+    ) -> None:
+        run = await self._start_agent("speaker", f"Responding: {utterance.text[:80]}")
+        if not self.state.floor_busy and self.state.voice_mode == "active":
+            self._spawn(self._publish_presence_cue(run.id, f"Thinking: {utterance.text[:80]}"), speech=True)
+        try:
+            if decision.route == "respond" and self.tts.available:
+                await self._stream_direct_speech(utterance, decision, session_id, room_epoch)
+                await self._finish_agent(run, "done")
+                return
+            result = await self.speaker.answer(self.state.model_copy(deep=True), utterance, decision)
+            if self.state.session_id != session_id or self.state.session_status == SessionStatus.CLOSED:
+                await self._finish_agent(run, "failed", "session_closed")
+                return
+            await self._finish_agent(run, "done")
+            if await self._apply_control(result.control):
+                return
+            if not result.speak:
+                await self._commit("speaker.veto", "Atlas chose not to speak")
+                return
+            await self._offer_speaker_text(result.spoken_core, "direct_address", [utterance.id])
+        except asyncio.CancelledError:
+            await self._finish_agent(run, "canceled", "superseded_by_new_turn")
+            raise
+        except Exception as error:
+            detail = self._safe_error(error)
+            await self._finish_agent(run, "failed", detail)
+            await self._commit("error", f"Speaker failed: {detail}")
+
+    async def _stream_direct_speech(
+        self,
+        utterance: Utterance,
+        decision: Decision,
+        session_id: str | None,
+        room_epoch: int,
+    ) -> None:
+        try:
+            await self._stream_direct_speech_inner(utterance, decision, session_id, room_epoch)
+        except asyncio.CancelledError as error:
+            await self._terminate_speech(utterance.id, "canceled", error, "superseded")
+            raise
+        except Exception as error:
+            await self._terminate_speech(utterance.id, "failed", error, "tts_or_speaker_failed")
+            raise
+
+    async def _stream_direct_speech_inner(
+        self,
+        utterance: Utterance,
+        decision: Decision,
+        session_id: str | None,
+        room_epoch: int,
+    ) -> None:
+        async with self._speech_lock:
+            if self.state.voice_mode == "muted" or not self._session_accepts_results(session_id):
+                return
+            speech = Speech(
+                text="",
+                reason="direct_address",
+                source_ids=[utterance.id],
+                room_epoch=room_epoch,
+            )
+            speech.status = "waiting_gap"
+            self.state.speeches.append(speech)
+            self.state.speeches = self.state.speeches[-100:]
+            text_queue: asyncio.Queue[str | None] = asyncio.Queue()
+            audio_queue: asyncio.Queue[tuple[bytes, int, str] | None] = asyncio.Queue()
+            subtitle_text = ""
+            subtitle_index = 0
+
+            async def text_chunks() -> AsyncIterator[str]:
+                while True:
+                    chunk = await text_queue.get()
+                    if chunk is None:
+                        return
+                    yield chunk
+
+            async def on_phrase(phrase: str) -> None:
+                cleaned = spoken_text(phrase)
+                if not cleaned:
+                    return
+                speech.text = f"{speech.text} {cleaned}".strip()
+                await text_queue.put(cleaned + " ")
+
+            async def on_audio(data: bytes, sample_rate: int, audio_format: str) -> None:
+                await audio_queue.put((data, sample_rate, audio_format))
+
+            async def on_subtitle(text: str, start_s: float, stop_s: float) -> None:
+                nonlocal subtitle_text, subtitle_index
+                cleaned = " ".join(text.split()).strip()
+                if not cleaned:
+                    return
+                if subtitle_text and subtitle_text[-1:] in ".?!":
+                    subtitle_text = ""
+                    subtitle_index += 1
+                subtitle_text = f"{subtitle_text} {cleaned}".strip()
+                await self.publish(
+                    {
+                        "type": "speech.subtitle",
+                        "speech_id": speech.id,
+                        "text": subtitle_text,
+                        "segment_index": subtitle_index,
+                        "start_s": start_s,
+                        "stop_s": stop_s,
+                        "final": False,
+                    }
+                )
+
+            async def produce_text() -> None:
+                try:
+                    result = await self.speaker.stream_answer(
+                        self.state.model_copy(deep=True), utterance, decision, on_phrase
+                    )
+                    speech.text = result.spoken_core if result.speak else ""
+                finally:
+                    await text_queue.put(None)
+
+            async def produce_audio() -> None:
+                try:
+                    await self.tts.stream_chunks(text_chunks(), self.state.language, on_audio, on_subtitle)
+                finally:
+                    await audio_queue.put(None)
+
+            speaker_task = asyncio.create_task(produce_text())
+            tts_task = asyncio.create_task(produce_audio())
+            self._speech_tasks.update({speaker_task, tts_task})
+            for task in (speaker_task, tts_task):
+                self._background.add(task)
+                task.add_done_callback(self._background.discard)
+                task.add_done_callback(self._speech_tasks.discard)
+
+            while self.state.floor_busy or (
+                monotonic() - self._last_floor_change < self.config.policy.direct_floor_gap_seconds
+            ):
+                if self.state.room_epoch != room_epoch or not self._session_accepts_results(session_id):
+                    speaker_task.cancel()
+                    tts_task.cancel()
+                    raise asyncio.CancelledError
+                self._floor_changed_event.clear()
+                with suppress(TimeoutError):
+                    await asyncio.wait_for(self._floor_changed_event.wait(), timeout=0.1)
+            if not self._session_accepts_results(session_id) or self.state.room_epoch != room_epoch:
+                speaker_task.cancel()
+                tts_task.cancel()
+                return
+            first_chunk = await audio_queue.get()
+            if first_chunk is None:
+                await asyncio.gather(speaker_task, tts_task)
+                speech.status = "suppressed"
+                await self.store.save(self.state)
+                await self._broadcast_state()
+                return
+            speech.status = "authorized"
+            self._active_speech_id = speech.id
+            self._playback_idle.clear()
+            await self.publish(
+                {
+                    "type": "speech.authorized",
+                    "speech_id": speech.id,
+                    "text": speech.text,
+                    "reason": speech.reason,
+                    "audio": None,
+                }
+            )
+            sequence = 0
+            data, sample_rate, audio_format = first_chunk
+            await self.publish(
+                {
+                    "type": "speech.audio.chunk",
+                    "speech_id": speech.id,
+                    "sequence": sequence,
+                    "data_base64": base64.b64encode(data).decode(),
+                    "format": audio_format,
+                    "sample_rate": sample_rate,
+                }
+            )
+            sequence += 1
+            while True:
+                chunk = await audio_queue.get()
+                if chunk is None:
+                    break
+                data, sample_rate, audio_format = chunk
+                await self.publish(
+                    {
+                        "type": "speech.audio.chunk",
+                        "speech_id": speech.id,
+                        "sequence": sequence,
+                        "data_base64": base64.b64encode(data).decode(),
+                        "format": audio_format,
+                        "sample_rate": sample_rate,
+                    }
+                )
+                sequence += 1
+            await asyncio.gather(speaker_task, tts_task)
+            self.state.health["tts"] = Health(status="ok")
+            self._gate.delivered(speech)
+            await self.store.save(self.state)
+            await self.publish({"type": "speech.audio.end", "speech_id": speech.id})
+            await self.publish(
+                {
+                    "type": "speech.subtitle",
+                    "speech_id": speech.id,
+                    "text": "",
+                    "final": True,
+                }
+            )
+            await self._broadcast_state()
+
+    async def _speaker_task(self, task: Task, session_id: str | None) -> None:
+        run = await self._start_agent("speaker", f"Reporting: {task.summary[:80]}")
+        try:
+            result = await self.speaker.report_task(self.state.model_copy(deep=True), task)
+            if self.state.session_id != session_id or self.state.session_status == SessionStatus.CLOSED:
+                await self._finish_agent(run, "failed", "session_closed")
+                return
+            await self._finish_agent(run, "done")
+            if result.speak:
+                await self._offer_speaker_text(result.spoken_core, "requested_result", [task.id])
+        except Exception as error:
+            await self._finish_agent(run, "failed", type(error).__name__)
+            await self._commit("error", f"Speaker progress failed: {type(error).__name__}")
+
+    async def _acknowledge_mission(self, task: Task, session_id: str | None) -> None:
+        run = await self._start_agent("speaker", f"Acknowledging: {task.summary[:80]}")
+        try:
+            result = await self.speaker.acknowledge_mission(self.state.model_copy(deep=True), task)
+            if not self._session_accepts_results(session_id):
+                await self._finish_agent(run, "canceled", "session_changed")
+                return
+            await self._finish_agent(run, "done")
+            if result.speak:
+                await self._offer_speaker_text(result.spoken_core, "direct_address", [task.id])
+        except Exception as error:
+            await self._finish_agent(run, "failed", self._safe_error(error))
+            await self._commit("error", f"Mission acknowledgement failed: {self._safe_error(error)}")
+
+    async def _offer_speaker_text(
+        self,
+        text: str,
+        reason: Literal["direct_address", "requested_result", "critical_finding"],
+        source_ids: list[str],
+    ) -> None:
+        natural_speech = spoken_text(text)
+        if not natural_speech:
+            return
+        self._spawn(
+            self._deliver(
+                Speech(
+                    text=natural_speech,
+                    reason=reason,
+                    source_ids=source_ids,
+                    room_epoch=self.state.room_epoch,
+                )
+            ),
+            speech=True,
+        )
+
+    async def _terminate_speech(
+        self,
+        source_id: str,
+        status: Literal["canceled", "failed"],
+        error: BaseException,
+        reason: str,
+    ) -> None:
+        await self._cancel_speech_tasks()
+        speech = next(
+            (item for item in reversed(self.state.speeches) if source_id in item.source_ids),
+            None,
+        )
+        detail = self._safe_error(error)
+        if speech is not None:
+            speech.status = status
+            speech.error = detail
+            await self.publish({"type": "speech.stop", "speech_id": speech.id, "reason": reason})
+            await self.publish({"type": "speech.audio.end", "speech_id": speech.id})
+            await self.publish(
+                {
+                    "type": "speech.subtitle",
+                    "speech_id": speech.id,
+                    "text": "",
+                    "final": True,
+                }
+            )
+        self._active_speech_id = None
+        self._playback_idle.set()
+        self.state.health["tts"] = Health(status="down", detail=detail)
+        await self._commit("speech.failed", detail)
+
+    async def _apply_control(self, control: str) -> bool:
+        if control == "mute":
+            self.state.voice_mode = "muted"
+            await self._commit("voice.muted", "Atlas keeps listening silently")
+        elif control == "unmute":
+            self.state.voice_mode = "active"
+            await self._commit("voice.active", "Atlas may speak again")
+        elif control == "end_session":
+            await self.session_command("stop")
+            return True
+        return False
+
+    async def _upsert_task(self, task: Task, *, report: bool = False) -> None:
+        current = next((index for index, item in enumerate(self.state.tasks) if item.id == task.id), None)
+        if current is None:
+            self.state.tasks.append(task)
+        else:
+            self.state.tasks[current] = task
+        self.state.tasks = self.state.tasks[-100:]
+        self.state.notes_document = integrate_task_finding(
+            self.state.notes_document, task, self.state.language
+        )
+        self.state.notes_document = normalize_notes(self.state.notes_document, self.state.tasks)
+        self.state.notes = render_notes(self.state.notes_document, self.state.language)
+        if task.phase in {"synthesizing", "integrating", "reporting", "complete"}:
+            self._notes_dirty = True
+            self._notes_kick.set()
+        logger.info("tool.%s name=%s summary=%r", task.status, task.tool, task.summary)
+        provider = "exa" if task.tool == "exa_search" else "jinko" if task.tool.startswith("jinko_") else None
+        if provider is not None and task.status in {"done", "failed"}:
+            self.state.health[provider] = Health(
+                status="ok" if task.status == "done" else "down",
+                detail=task.error or "",
+            )
+        await self._commit("task", f"{task.status}: {task.summary}")
+        if report and task.status in {"done", "failed"}:
+            self._spawn(self._speaker_task(task.model_copy(deep=True), self.state.session_id))
+
+    async def _apply_board_operations(self, operations: list[BoardOperation], source_id: str) -> None:
+        for operation in operations:
+            if operation.action == "create":
+                if not operation.title or not operation.body:
+                    continue
+                existing = next(
+                    (
+                        card
+                        for card in self.state.cards
+                        if operation.concept_key and card.concept_key == operation.concept_key
+                    ),
+                    None,
+                )
+                if existing is not None:
+                    existing.kind = operation.kind
+                    existing.title = operation.title
+                    existing.body = operation.body
+                    existing.source_ids = list(
+                        dict.fromkeys([*existing.source_ids, *([source_id] if source_id else [])])
+                    )
+                    existing.updated_at = now_iso()
+                    await self._activity("board.update", f"{existing.title}: concept refreshed")
+                    continue
+                card = Card(
+                    kind=operation.kind,
+                    title=operation.title,
+                    body=operation.body,
+                    source_ids=[source_id] if source_id else [],
+                    concept_key=operation.concept_key,
+                )
+                self.state.cards.append(card)
+                await self._activity("board.create", f"{card.title}: {operation.reason}")
+                continue
+            target = next((card for card in self.state.cards if card.id == operation.card_id), None)
+            if target is None:
+                continue
+            if operation.action in {"update", "merge"}:
+                target.kind = operation.kind
+                target.title = operation.title or target.title
+                target.body = operation.body or target.body
+                target.concept_key = operation.concept_key or target.concept_key
+                target.source_ids = list(
+                    dict.fromkeys([*target.source_ids, *([source_id] if source_id else [])])
+                )
+                target.updated_at = now_iso()
+            if operation.action == "merge":
+                merged = [card for card in self.state.cards if card.id in operation.merge_ids]
+                for card in merged:
+                    target.source_ids = list(dict.fromkeys([*target.source_ids, *card.source_ids]))
+                removed = set(operation.merge_ids) - {target.id}
+                self.state.cards = [card for card in self.state.cards if card.id not in removed]
+            elif operation.action == "delete":
+                self.state.cards = [card for card in self.state.cards if card.id != target.id]
+            await self._activity(f"board.{operation.action}", f"{target.title}: {operation.reason}")
+        self.state.cards = self.state.cards[-100:]
+
+    async def _deliver(self, speech: Speech) -> None:
+        async with self._speech_lock:
+            blocked = self._gate.validate(speech)
+            if self.state.voice_mode == "muted":
+                blocked = "voice_muted"
+            self.state.speeches.append(speech)
+            self.state.speeches = self.state.speeches[-100:]
+            if blocked:
+                speech.status = "suppressed"
+                await self._commit("suppressed", f"{blocked}: {speech.text}")
+                return
+            try:
+                await asyncio.wait_for(self._playback_idle.wait(), timeout=45)
+            except TimeoutError:
+                if self._active_speech_id is not None:
+                    await self.publish(
+                        {
+                            "type": "speech.stop",
+                            "speech_id": self._active_speech_id,
+                            "reason": "playback_timeout",
+                        }
+                    )
+                self._active_speech_id = None
+                self._playback_idle.set()
+            speech.status = "waiting_gap"
+            await self._broadcast_state()
+            audio_queue: asyncio.Queue[tuple[bytes, int, str] | None] = asyncio.Queue()
+            tts_error: BaseException | None = None
+            subtitle_text = ""
+            subtitle_index = 0
+
+            async def queue_audio(data: bytes, sample_rate: int, audio_format: str) -> None:
+                await audio_queue.put((data, sample_rate, audio_format))
+
+            async def on_subtitle(text: str, start_s: float, stop_s: float) -> None:
+                nonlocal subtitle_text, subtitle_index
+                cleaned = " ".join(text.split()).strip()
+                if not cleaned:
+                    return
+                if subtitle_text and subtitle_text[-1:] in ".?!":
+                    subtitle_text = ""
+                    subtitle_index += 1
+                subtitle_text = f"{subtitle_text} {cleaned}".strip()
+                await self.publish(
+                    {
+                        "type": "speech.subtitle",
+                        "speech_id": speech.id,
+                        "text": subtitle_text,
+                        "segment_index": subtitle_index,
+                        "start_s": start_s,
+                        "stop_s": stop_s,
+                        "final": False,
+                    }
+                )
+
+            async def text_segments() -> AsyncIterator[str]:
+                for segment in spoken_segments(speech.text):
+                    yield segment + " "
+
+            async def stream_audio() -> None:
+                nonlocal tts_error
+                try:
+                    await self.tts.stream_chunks(
+                        text_segments(), self.state.language, queue_audio, on_subtitle
+                    )
+                except BaseException as error:
+                    tts_error = error
+                finally:
+                    await audio_queue.put(None)
+
+            if not self.tts.available:
+                speech.status = "failed"
+                speech.error = "TTS unavailable"
+                await self._commit("speech.failed", speech.error)
+                return
+            tts_task = asyncio.create_task(stream_audio())
+            self._background.add(tts_task)
+            self._speech_tasks.add(tts_task)
+            tts_task.add_done_callback(self._background.discard)
+            tts_task.add_done_callback(self._speech_tasks.discard)
+            required_gap = (
+                self.config.policy.direct_floor_gap_seconds
+                if speech.reason == "direct_address"
+                else self.config.policy.stable_floor_gap_seconds
+            )
+            while True:
+                quiet_for = monotonic() - self._last_floor_change
+                if not self.state.floor_busy and quiet_for >= required_gap:
+                    break
+                if not self._session_accepts_results(self.state.session_id):
+                    speech.status = "canceled"
+                    speech.error = "Session no longer accepts speech"
+                    tts_task.cancel()
+                    return
+                await asyncio.sleep(0.05)
+            if speech.room_epoch != self.state.room_epoch:
+                tts_task.cancel()
+                speech.status = "canceled"
+                speech.error = "Room context changed before playback"
+                await self._commit("speech.canceled", speech.error)
+                return
+            first_chunk = await audio_queue.get()
+            if first_chunk is None:
+                await tts_task
+                detail = self._safe_error(tts_error or RuntimeError("TTS returned no audio"))
+                speech.status = "failed"
+                speech.error = detail
+                self.state.health["tts"] = Health(status="down", detail=detail)
+                await self._commit("speech.failed", detail)
+                return
+            speech.status = "authorized"
+            self._active_speech_id = speech.id
+            self._playback_idle.clear()
+            self._gate.delivered(speech)
+            await self.store.save(self.state)
+            await self.publish(
+                {
+                    "type": "speech.authorized",
+                    "speech_id": speech.id,
+                    "text": speech.text,
+                    "reason": speech.reason,
+                    "audio": None,
+                }
+            )
+            sequence = 0
+            chunk: tuple[bytes, int, str] | None = first_chunk
+            while chunk is not None:
+                data, sample_rate, audio_format = chunk
+                await self.publish(
+                    {
+                        "type": "speech.audio.chunk",
+                        "speech_id": speech.id,
+                        "sequence": sequence,
+                        "data_base64": base64.b64encode(data).decode(),
+                        "format": audio_format,
+                        "sample_rate": sample_rate,
+                    }
+                )
+                sequence += 1
+                chunk = await audio_queue.get()
+            await tts_task
+            await self.publish({"type": "speech.audio.end", "speech_id": speech.id})
+            await self.publish({"type": "speech.subtitle", "speech_id": speech.id, "text": "", "final": True})
+            if tts_error is None:
+                self.state.health["tts"] = Health(status="ok")
+            else:
+                detail = self._safe_error(tts_error)
+                speech.status = "failed"
+                speech.error = detail
+                self.state.health["tts"] = Health(status="down", detail=detail)
+                self._active_speech_id = None
+                self._playback_idle.set()
+                await self._activity("speech.failed", detail)
+            await self._broadcast_state()
+
+    @staticmethod
+    def tts_result(result: Any) -> dict[str, object]:
+        return {
+            "data_base64": result.data_base64,
+            "format": result.format,
+            "sample_rate": result.sample_rate,
+        }
+
+    async def _notes_loop(self) -> None:
+        while True:
+            with suppress(TimeoutError):
+                await asyncio.wait_for(
+                    self._notes_kick.wait(), timeout=self.config.session.notes_interval_seconds
+                )
+            self._notes_kick.clear()
+            await asyncio.sleep(1.5)
+            if self._notes_dirty:
+                await self._write_notes()
+
+    async def _write_notes(self) -> None:
+        async with self._notes_lock:
+            if not self._notes_dirty:
+                return
+            cursor = len(self.state.transcript)
+            session_id = self.state.session_id
+            snapshot = self.state.model_copy(deep=True)
+            agent_run = await self._start_agent("notes", f"Updating notes v{self.state.notes_version + 1}")
+            try:
+                previous_board_memory = self._board_memory_signature(snapshot.notes_document)
+                notes_document = await self.coordinator.write_notes(snapshot)
+                if self.state.session_id == session_id:
+                    self.state.notes_document = notes_document
+                    self.state.notes = render_notes(notes_document, self.state.language)
+                    self.state.notes_cursor = cursor
+                    self.state.notes_version += 1
+                    self.state.pipeline.note_updates += 1
+                    logger.info(
+                        "notes.updated version=%d characters=%d",
+                        self.state.notes_version,
+                        len(self.state.notes),
+                    )
+                    self._notes_dirty = len(self.state.transcript) > cursor
+                    await self._finish_agent(agent_run, "done")
+                    await self._commit("notes", f"Live notes v{self.state.notes_version} updated")
+                    if self._board_memory_signature(notes_document) != previous_board_memory:
+                        self._spawn(self.curate_board(force=False))
+                else:
+                    await self._finish_agent(agent_run, "done")
+            except Exception as error:
+                await self._finish_agent(agent_run, "failed", type(error).__name__)
+                await self._activity("error", f"Notes failed: {type(error).__name__}")
+                await self._broadcast_state()
+
+    @staticmethod
+    def _board_memory_signature(document: Any) -> tuple[tuple[str, ...], ...]:
+        return tuple(
+            tuple(getattr(document, field))
+            for field in (
+                "topics",
+                "findings",
+                "ideas",
+                "hypotheses",
+                "questions",
+                "decisions",
+                "recommendations",
+                "commitments",
+            )
+        )
+
+    async def _rename_session(self, *, force: bool = False) -> None:
+        async with self._naming_lock:
+            session_id = self.state.session_id
+            if session_id is None or not self.state.transcript:
+                return
+            cursor = len(self.state.transcript)
+            if cursor <= self.state.title_cursor and not force:
+                return
+            snapshot = self.state.model_copy(deep=True)
+            agent_run = await self._start_agent("naming", "Revising the session title")
+            try:
+                title = await self.coordinator.name_session(snapshot)
+                if self.state.session_id == session_id:
+                    self.state.title_cursor = cursor
+                    self.state.title_version += 1
+                    if title != self.state.title:
+                        self.state.title = title
+                        await self._commit("session.renamed", title)
+                await self._finish_agent(agent_run, "done")
+            except Exception as error:
+                await self._finish_agent(agent_run, "failed", type(error).__name__)
+                await self._activity("error", f"Session naming failed: {type(error).__name__}")
+
+    def _set_health(self) -> None:
+        self.state.health = {
+            "storage": Health(status="ok", detail=str(self.config.storage.resolved_path())),
+            "stt": Health(status="standby" if self.stt.available else "unconfigured"),
+            "tts": Health(status="standby" if self.tts.available else "unconfigured"),
+            "decision": Health(
+                status="standby" if getattr(self.decision, "available", False) else "degraded"
+            ),
+            "generator": Health(status="standby" if self.coordinator.generator.available else "unconfigured"),
+            **{
+                name: Health(status="standby" if available else "unconfigured")
+                for name, available in self.tool_health.items()
+            },
+        }
+
+    async def _start_stt(self) -> None:
+        if not self.stt.available:
+            self.state.health["stt"] = Health(status="unconfigured")
+            return
+        try:
+            await self.stt.start(
+                self.on_partial,
+                self.commit_utterance,
+                self.on_stt_event,
+                self.state.language,
+            )
+            self._stt_started_at = monotonic()
+            self.state.health["stt"] = Health(status="ok", detail="Live Gradium stream")
+        except Exception as error:
+            self.state.health["stt"] = Health(
+                status="down", detail=f"{type(error).__name__}: {str(error)[:180]}"
+            )
+
+    async def _activity(self, kind: str, summary: str) -> None:
+        self.state.activities.append(Activity(kind=kind, summary=summary))
+        self.state.activities = self.state.activities[-200:]
+
+    async def _start_agent(self, agent: str, summary: str) -> AgentRun:
+        run = AgentRun(agent=agent, summary=summary)  # type: ignore[arg-type]
+        self.state.agent_runs.append(run)
+        self._agent_started[run.id] = monotonic()
+        self.state.agent_runs = self.state.agent_runs[-100:]
+        self.state.working = summary
+        await self._activity("agent.started", f"{agent}: {summary}")
+        await self.store.save(self.state)
+        await self._broadcast_state()
+        return run
+
+    async def _publish_presence_cue(self, run_id: str, label: str) -> None:
+        if not self.tts.available:
+            return
+        audio = self._presence_audio.get("universal")
+        if audio is None:
+            return
+        run = next((item for item in self.state.agent_runs if item.id == run_id), None)
+        if run is None or run.status != "running" or self.state.floor_busy:
+            return
+        await self.publish(
+            {
+                "type": "presence.cue",
+                "cue": "thinking",
+                "label": label,
+                "audio": audio,
+            }
+        )
+
+    async def _prewarm_presence_cue(self) -> None:
+        if not self.tts.available or "universal" in self._presence_audio:
+            return
+        try:
+            result = await self.tts.synthesize("Mmh...", "fr", padding_bonus=0.8, temp=0.9)
+            self._presence_audio["universal"] = self.tts_result(result)
+        except Exception as error:
+            logger.warning("presence.cue prewarm failed: %s", type(error).__name__)
+
+    async def _finish_agent(self, run: AgentRun, status: str, error: str | None = None) -> None:
+        if run.status != "running":
+            return
+        run.status = status  # type: ignore[assignment]
+        run.error = error
+        started = self._agent_started.pop(run.id, None)
+        run.duration_ms = round((monotonic() - started) * 1000) if started is not None else None
+        run.completed_at = now_iso()
+        if not any(item.status == "running" for item in self.state.agent_runs):
+            self.state.working = ""
+        await self._activity(f"agent.{status}", f"{run.agent}: {run.summary}")
+        await self.store.save(self.state)
+        await self._broadcast_state()
+
+    async def _commit(self, kind: str, summary: str) -> None:
+        await self._activity(kind, summary)
+        self.state.updated_at = now_iso()
+        await self.store.save(self.state)
+        await self._broadcast_state()
+
+    async def _broadcast_state(self) -> None:
+        await self.publish(
+            {
+                "type": "state.snapshot",
+                "state": self.client_state().model_dump(mode="json"),
+                "sessions": [item.model_dump(mode="json") for item in await self.store.list_sessions()],
+            }
+        )
+
+    async def _prepare_session_switch(self) -> None:
+        await self._cancel_speech_tasks()
+        await self._interrupt_playback("session_changed")
+        if self.state.session_status in {SessionStatus.STARTING, SessionStatus.LISTENING}:
+            await self.stt.stop()
+            self.state.session_status = SessionStatus.PAUSED
+            self.state.updated_at = now_iso()
+            await self.store.save(self.state)
+        for task in tuple(self._background):
+            task.cancel()
+        if self._background:
+            await asyncio.gather(*self._background, return_exceptions=True)
+        self._background.clear()
+        self._notes_dirty = False
+        self._notes_kick.clear()
+
+    def _new_state(self) -> AtlasState:
+        return AtlasState(
+            project_id=self.product.project_id,
+            protocol_version=self.product.protocol_version,
+            identity_name=self.product.companion_name,
+            language=self.config.session.language,
+        )
+
+    async def _cancel_speech_tasks(self) -> None:
+        for speech in self.state.speeches:
+            if speech.status in {"proposed", "waiting_gap"}:
+                speech.status = "interrupted"
+        current = asyncio.current_task()
+        tasks = [task for task in self._speech_tasks if task is not current]
+        for task in tasks:
+            task.cancel()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+        self._speech_tasks.difference_update(tasks)
+
+    async def _cancel_direct_speech(self, reason: str) -> None:
+        task = self._direct_speech_task
+        if task is None or task.done():
+            return
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+        self._direct_speech_task = None
+        await self._interrupt_playback(reason)
+
+    def _spawn(self, awaitable: Any, *, speech: bool = False) -> asyncio.Task[Any]:
+        task = asyncio.create_task(awaitable)
+        self._background.add(task)
+        if speech:
+            self._speech_tasks.add(task)
+        task.add_done_callback(self._background.discard)
+        task.add_done_callback(self._speech_tasks.discard)
+        return task
+
+    @staticmethod
+    def _safe_error(error: BaseException) -> str:
+        detail = " ".join(str(error).split())
+        return f"{type(error).__name__}: {detail}"[:240]

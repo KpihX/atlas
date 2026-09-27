@@ -7,6 +7,8 @@ from typing import Any, cast
 import httpx
 from websockets.asyncio.client import ClientConnection, connect
 
+from atlas.config import load_product
+
 
 async def wait_state(websocket: ClientConnection, key: str, value: str) -> dict[str, object]:
     async with asyncio.timeout(90):
@@ -28,7 +30,7 @@ async def main() -> None:
             json.dumps(
                 {
                     "type": "client.hello",
-                    "protocol_version": 7,
+                    "protocol_version": load_product().protocol_version,
                     "client_id": "control-smoke",
                     "capabilities": {"audio_capture": False, "audio_playback": False},
                 }
@@ -38,7 +40,6 @@ async def main() -> None:
             json.dumps(
                 {
                     "type": "session.start",
-                    "assistant_name": "Assistant",
                     "language": "en",
                     "capture_mode": "microphone",
                     "output_mode": "local_only",
@@ -46,15 +47,15 @@ async def main() -> None:
             )
         )
         await websocket.send(
-            json.dumps({"type": "transcript.inject", "text": "Assistant, stay silent but keep listening."})
+            json.dumps({"type": "transcript.inject", "text": "Atlas, stay silent but keep listening."})
         )
         muted = await wait_state(websocket, "voice_mode", "muted")
         await websocket.send(
-            json.dumps({"type": "transcript.inject", "text": "Assistant, you may speak again now."})
+            json.dumps({"type": "transcript.inject", "text": "Atlas, you may speak again now."})
         )
         await wait_state(websocket, "voice_mode", "active")
         await websocket.send(
-            json.dumps({"type": "transcript.inject", "text": "Assistant, end this session now."})
+            json.dumps({"type": "transcript.inject", "text": "Atlas, end this session now."})
         )
         closed = await wait_state(websocket, "session_status", "closed")
         session_id = str(closed["session_id"])

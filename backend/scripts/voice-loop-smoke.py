@@ -3,8 +3,8 @@ from __future__ import annotations
 import asyncio
 import base64
 
-from sidecar.adapters.gradium import GradiumSTT, GradiumTTS
-from sidecar.config import load_config
+from atlas.adapters.gradium import GradiumSTT, GradiumTTS
+from atlas.config import load_config
 
 
 async def transcribe(sentences: list[str], language: str) -> list[str]:
@@ -45,13 +45,13 @@ async def transcribe(sentences: list[str], language: str) -> list[str]:
 async def main() -> None:
     await transcribe(
         [
-            "Assistant, we are starting a new session to prepare the project.",
+            "Atlas, we are starting a new session to prepare the project.",
             "The second sentence must continue on the same connection.",
             "The third sentence verifies that transcription does not freeze.",
         ],
         "en",
     )
-    await transcribe(["Assistant, nous lançons une nouvelle session pour préparer le projet."], "fr")
+    await transcribe(["Atlas, nous lançons une nouvelle session pour préparer le projet."], "fr")
 
 
 if __name__ == "__main__":

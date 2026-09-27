@@ -1,0 +1,54 @@
+{
+  "synthesis": [
+    "The team is shaping an emergency-response hackathon project for Nepal floods.",
+    "The concept is an Atlas-supported workflow for faster interventions, but domain expertise and verified data remain missing."
+  ],
+  "participants": [
+    "Unknown participant",
+    "Pavel",
+    "Pavel",
+    "Speaker 2"
+  ],
+  "topics": [
+    "Nepal flood response",
+    "Emergency-response workflow",
+    "Domain expertise",
+    "Verified data",
+    "Nepal flood response",
+    "Frontier technologies",
+    "Adjunct workflow",
+    "Hackathon feasibility",
+    "Classic intervention procedures",
+    "Breakpoints",
+    "PDI meaning"
+  ],
+  "hypotheses": [
+    "An agentic workflow could accelerate interventions."
+  ],
+  "questions": [
+    "What happened in Nepal?",
+    "What happened in Nepal?",
+    "Which verified data exists?",
+    "Which experts are needed?",
+    "What does PDI mean?",
+    "What are the classic intervention procedures?",
+    "Where are the operational breakpoints?",
+    "What is the project scope?",
+    "Is the project feasible?"
+  ],
+  "decisions": [],
+  "actions": [
+    "Verify the Nepal flood facts.",
+    "Identify a domain expert.",
+    "Map intervention procedures.",
+    "Verify the Nepal flood facts."
+  ],
+  "current_work": [
+    "Atlas is preparing a self-presentation.",
+    "Research is pending forever."
+  ],
+  "source_ids": [
+    "utt_nepal",
+    "utt_scope"
+  ]
+}

@@ -1,4 +1,6 @@
 {
-  "project_id": "meeting-sidecar",
-  "protocol_version": 7
+  "project_id": "atlas",
+  "display_name": "Atlas",
+  "companion_name": "Atlas",
+  "protocol_version": 11
 }

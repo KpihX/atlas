@@ -1,4 +1,4 @@
-from sidecar.core.voice import spoken_text
+from atlas.core.voice import spoken_text
 
 
 def test_spoken_text_removes_visual_markup() -> None:

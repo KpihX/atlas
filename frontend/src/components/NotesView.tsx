@@ -1,9 +1,9 @@
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { BookOpenText } from "lucide-react";
-import type { MeetingState } from "../protocol";
+import type { AtlasState } from "../protocol";
 
-export function NotesView({ state }: { state: MeetingState }) {
+export function NotesView({ state }: { state: AtlasState }) {
   if (!state.notes) {
     return <div className="empty notes-empty"><BookOpenText /><h2>Notes will grow with the room.</h2><p>The notes agent is waiting for a complete idea.</p></div>;
   }

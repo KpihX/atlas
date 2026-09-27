@@ -3,7 +3,7 @@
 > Status: v0.1 exists. The multi-agent architecture in this contract is the target rebuild.
 
 ```text
-project_id       = "meeting-sidecar"
+project_id       = "atlas"
 contract_version = "4.0.0"
 backend          = "Python 3.12 + FastAPI + uv"
 frontend         = "TypeScript + React + Vite + Bun"
@@ -21,7 +21,7 @@ conversation while work is running.
 
 ```text
 +--------------------------------------------------------------------------------------------------+
-|                                      MEETING SIDECAR                                             |
+|                                             ATLAS                                                |
 +--------------------------------------------------------------------------------------------------+
 
 
@@ -368,7 +368,7 @@ tool payload.
 ## Physical Backend Map
 
 ```text
-backend/src/sidecar/
+backend/src/atlas/
 |
 +-- runtime/
 |   +-- supervisor.py          agent lifecycle and recovery
@@ -425,30 +425,26 @@ Dependency direction:
 
 ---
 
-## Current Implementation Versus Target
+## Current Runtime
 
 ```text
- CURRENT v0.1                                  TARGET v0.2
- ------------                                  -----------
-
- utterance                                     utterance
-     |                                             |
-     v                                             +----> Speaker, immediate
-    Jev                                            |
-     |                                             +----> Worker, background
-     v                                             |
- global turn lock                                  +----> Notes, background
-     |                                             |
- Coordinator                                       +----> Board, background
+ utterance
      |
-     +--> tool
-     +--> board
-     +--> speech
-
- Result: 9 to 21 second conversational stalls.   Result: no Worker can block Speaker.
+     v
+    Jev
+     |
+     +----------> Speaker, immediate and independently vetoed
+     |
+     +----------> Worker, background and tool-backed
+     |
+     +----------> Shared Memory
+                       |
+                       +--> Notes projection
+                       +--> Board projection
+                       +--> Naming projection
 ```
 
-Already working in v0.1:
+Materialized now:
 
 ```text
  real microphone and Gradium STT
@@ -456,25 +452,24 @@ Already working in v0.1:
  SQLite sessions and exports
  Jev decisions
  Exa and Jinko registry
- living notes
+ structured bounded living notes
  agentic board operations
- Opus TTS and browser playback
+ realtime PCM TTS streaming and browser playback
  barge-in, mute, unmute and End
  visible agent/tool timelines
 ```
 
-Not yet materialized:
+Still to deepen:
 
 ```text
- append-only event journal
- independent Speaker runtime
- Worker Supervisor runtime
- immutable shared-memory projections
- removal of the global conversational lock
+ append-only event journal beyond the current activity ledger
+ immutable versioned memory snapshots
+ explicit Worker Supervisor policy beyond task lifecycle state
+ semantic proactive queue expiry and context invalidation
 ```
 
-The next implementation pass starts with Event Journal and Shared Memory, then extracts Speaker.
-Workers and memory agents migrate afterward without changing the browser protocol.
+These deepen persistence and scheduling without changing the browser protocol or re-coupling Speaker
+to Worker execution.
 
 ---
 
@@ -518,24 +513,29 @@ Workers and memory agents migrate afterward without changing the browser protoco
 ## Model and Tool Configuration
 
 ```text
- conversation model  = llm.active_model
- utility model       = llm.utility_model
+ speaker model       = llm.roles.speaker
+ worker model        = llm.roles.worker
+ notes model         = llm.roles.notes
+ board model         = llm.roles.board
+ naming model        = llm.roles.naming
+ fallback model      = llm.roles.fallback
  fast decision       = TypeSafe Jev
 
  registered generators:
-   OpenAI gpt-5.6-luna
-   Zen Muse Spark 1.3
-   Zen Mimo 2.6 Flash Free
-   Zen Mimo 2.5 Free
+   OpenAI GPT-5 mini
+   OpenAI GPT-4.1 mini
+   OpenAI GPT-4.1 nano
+   OpenAI GPT-5.6 Luna
+   Zen Muse Spark 1.3 fallback
 
  registered tools:
    Exa Search      READ
    Jinko Flights   READ
 ```
 
-Different models may run concurrently. Calls sharing one provider use bounded slots. A failed utility
-model may fall back to the active model. Configuration selects models; business code contains no
-provider-specific branch.
+Different models may run concurrently. Calls sharing one provider use bounded slots. A failed role
+model may fall back to the configured fallback. Configuration selects models through portable
+`provider/model` references; business code contains no provider-specific branch.
 
 ---
 
@@ -562,3 +562,9 @@ contributes event-driven wakes, speech queues and barge-in. `meeting-colab` cont
 provenance and approval gates. The Proxies contribute contract-first boundaries and transparency.
 
 Reference repositories are read-only inspiration, never runtime dependencies.
+## Unified Identity
+
+Every internal role inherits one shared product identity. Participants interact with Atlas,
+never with a Speaker model, Worker model, provider, or backend component. The Speaker reads a compact
+projection of shared memory and speaks on behalf of completed system work. Capability questions are
+routed to the capability-discovery tool, then returned through the same unified voice.

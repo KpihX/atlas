@@ -3,9 +3,9 @@ from __future__ import annotations
 import httpx
 import pytest
 
-from sidecar.adapters.exa import ExaSearch
-from sidecar.adapters.jinko import JinkoFlights
-from sidecar.config import ExaConfig, JinkoConfig
+from atlas.adapters.exa import ExaSearch
+from atlas.adapters.jinko import JinkoFlights
+from atlas.config import ExaConfig, JinkoConfig
 
 
 @pytest.mark.asyncio

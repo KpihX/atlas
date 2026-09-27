@@ -3,14 +3,14 @@ SHELL := /bin/zsh
 
 BACKEND := backend
 FRONTEND := frontend
-CONFIG := $(HOME)/.config/meeting-sidecar/config.json
+CONFIG := $(HOME)/.config/atlas/atlas.json
 
 .PHONY: help install config protocol build serve dev dev-backend dev-frontend check check-backend check-frontend status log push
 
 help:  ## Show available targets
 	@printf '%s\n' \
 	  '  install         Sync both projects, install user config, generate protocol, build' \
-	  '  config          Install ~/.config/meeting-sidecar/config.json if absent' \
+	  '  config          Install ~/.config/atlas/atlas.json if absent' \
 	  '  protocol        Generate frontend protocol types from backend schemas' \
 	  '  build           Build the browser client' \
 	  '  serve           Build and run the complete local application' \
@@ -27,23 +27,23 @@ install:  ## Install the complete local development application
 	@$(MAKE) build
 
 config:  ## Install the adjustable user configuration without overwriting it
-	@uv run --project $(BACKEND) meeting-sidecar config-init
+	@uv run --project $(BACKEND) atlas config-init
 
 protocol:  ## Generate TypeScript protocol types from backend OpenAPI
-	@uv run --project $(BACKEND) meeting-sidecar export-openapi $(CURDIR)/$(FRONTEND)/openapi.json
+	@uv run --project $(BACKEND) atlas export-openapi $(CURDIR)/$(FRONTEND)/openapi.json
 	@bun run --cwd $(FRONTEND) generate:protocol
 
 build:  ## Build the browser client
 	@bun run --cwd $(FRONTEND) build
 
 serve: config protocol build  ## Run backend and serve the built browser client
-	@SIDECAR_FRONTEND_DIR="$(CURDIR)/$(FRONTEND)/dist" uv run --project $(BACKEND) meeting-sidecar serve
+	@ATLAS_FRONTEND_DIR="$(CURDIR)/$(FRONTEND)/dist" uv run --project $(BACKEND) atlas serve
 
 dev: config protocol  ## Run backend and Vite development servers
 	@$(MAKE) -j2 dev-backend dev-frontend
 
 dev-backend:  ## Run the backend with reload
-	@uv run --project $(BACKEND) meeting-sidecar serve --reload
+	@uv run --project $(BACKEND) atlas serve --reload
 
 dev-frontend:  ## Run Vite
 	@bun run --cwd $(FRONTEND) dev

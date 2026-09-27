@@ -1,12 +1,13 @@
+# pyright: reportPrivateUsage=false
 from __future__ import annotations
 
 import asyncio
 
-from sidecar.config import load_config, load_product
-from sidecar.core.coordinator import Coordinator
-from sidecar.core.models import Decision, MeetingState, Utterance
-from sidecar.core.tools import ToolRegistry, ToolSpec
-from sidecar.llm import OpenAICompatibleGenerator
+from atlas.config import load_config, load_product
+from atlas.core.coordinator import Coordinator
+from atlas.core.models import AtlasState, Decision, Utterance
+from atlas.core.tools import ToolRegistry, ToolSpec
+from atlas.llm import OpenAICompatibleGenerator
 
 
 async def unavailable(_: dict[str, object]) -> dict[str, object]:
@@ -26,17 +27,23 @@ async def main() -> None:
             handler=unavailable,
         )
     )
-    coordinator = Coordinator(generator, tools, config.policy)
-    state = MeetingState(
+    coordinator = Coordinator(generator, tools, config.policy, config.llm.roles)
+    state = AtlasState(
         project_id=product.project_id,
         protocol_version=product.protocol_version,
-        assistant_name="Assistant",
+        identity_name="Atlas",
         language="fr",
-        transcript=[Utterance(text="Assistant, cherche avec Exa la documentation officielle de Python.")],
+        transcript=[Utterance(text="Atlas, cherche avec Exa la documentation officielle de Python.")],
     )
-    decision = Decision(route="act", addressed_probability=1, speech_value=2, timing="next_gap")
+    decision = Decision(
+        route="act",
+        addressee="atlas",
+        memory="capture",
+        initiative="assigned",
+        timing="next_gap",
+    )
     try:
-        response = await generator.generate(coordinator._messages(state, decision))
+        response = await generator.generate(coordinator._messages(state, decision), config.llm.roles.worker)
         print("RAW")
         print(response.content)
         print("PARSED")

@@ -3,9 +3,9 @@ requires = ["uv_build>=0.8.15,<0.9.0"]
 build-backend = "uv_build"
 
 [project]
-name = "meeting-sidecar"
+name = "atlas"
 version = "0.1.0"
-description = "Headless real-time meeting agent backend"
+description = "Headless real-time Atlas collaboration backend"
 authors = [{ name = "KAMDEM Ivann", email = "kapoivha@gmail.com" }]
 requires-python = ">=3.12"
 dependencies = [
@@ -22,7 +22,7 @@ dependencies = [
 ]
 
 [project.scripts]
-meeting-sidecar = "sidecar.cli:app"
+atlas = "atlas.cli:app"
 
 [dependency-groups]
 dev = [
@@ -33,7 +33,7 @@ dev = [
 ]
 
 [tool.uv.build-backend]
-module-name = "sidecar"
+module-name = "atlas"
 
 [tool.ruff]
 line-length = 110

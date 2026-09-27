@@ -121,7 +121,7 @@ export interface components {
              * @default running
              * @enum {string}
              */
-            status: "running" | "done" | "failed";
+            status: "running" | "done" | "failed" | "canceled";
             /** Error */
             error?: string | null;
             /** Duration Ms */
@@ -131,171 +131,8 @@ export interface components {
             /** Completed At */
             completed_at?: string | null;
         };
-        /** BackendHello */
-        BackendHello: {
-            /**
-             * @description discriminator enum property added by openapi-typescript
-             * @enum {string}
-             */
-            type: "backend.hello";
-            /** Project Id */
-            project_id: string;
-            /** Protocol Version */
-            protocol_version: number;
-        };
-        /** BoardCurate */
-        BoardCurate: {
-            /**
-             * @description discriminator enum property added by openapi-typescript
-             * @enum {string}
-             */
-            type: "board.curate";
-        };
-        /** BootstrapResponse */
-        BootstrapResponse: {
-            /** Project Id */
-            project_id: string;
-            /** Protocol Version */
-            protocol_version: number;
-            /** Active Model */
-            active_model: string;
-            /** Models */
-            models: string[];
-            state: components["schemas"]["MeetingState"];
-            /** Sessions */
-            sessions: components["schemas"]["SessionSummary"][];
-        };
-        /** CaptureChanged */
-        CaptureChanged: {
-            /**
-             * @description discriminator enum property added by openapi-typescript
-             * @enum {string}
-             */
-            type: "capture.changed";
-            /**
-             * Source
-             * @enum {string}
-             */
-            source: "microphone" | "system";
-            /**
-             * Status
-             * @enum {string}
-             */
-            status: "active" | "denied" | "ended" | "unavailable";
-        };
-        /** Card */
-        Card: {
-            /** Id */
-            id?: string;
-            /**
-             * Kind
-             * @default finding
-             * @enum {string}
-             */
-            kind: "idea" | "question" | "decision" | "suggestion" | "finding";
-            /** Title */
-            title: string;
-            /** Body */
-            body: string;
-            /** Source Ids */
-            source_ids?: string[];
-            /** Updated At */
-            updated_at?: string;
-        };
-        /** ClientHello */
-        ClientHello: {
-            /**
-             * @description discriminator enum property added by openapi-typescript
-             * @enum {string}
-             */
-            type: "client.hello";
-            /** Protocol Version */
-            protocol_version: number;
-            /** Client Id */
-            client_id: string;
-            /** Capabilities */
-            capabilities?: {
-                [key: string]: boolean;
-            };
-        };
-        /** Decision */
-        Decision: {
-            /**
-             * Route
-             * @enum {string}
-             */
-            route: "ignore" | "capture" | "investigate" | "respond" | "act" | "control";
-            /**
-             * Addressed Probability
-             * @default 0
-             */
-            addressed_probability: number;
-            /**
-             * Salience
-             * @default 0
-             */
-            salience: number;
-            /**
-             * Speech Value
-             * @default 0
-             */
-            speech_value: number;
-            /**
-             * Timing
-             * @default silent
-             * @enum {string}
-             */
-            timing: "silent" | "next_gap" | "later";
-            /**
-             * Rationale
-             * @default
-             */
-            rationale: string;
-        };
-        /** DecisionRecord */
-        DecisionRecord: {
-            /** Id */
-            id?: string;
-            /** Utterance Id */
-            utterance_id: string;
-            /** Context */
-            context: {
-                [key: string]: unknown;
-            };
-            result: components["schemas"]["Decision"];
-            /** Decided At */
-            decided_at?: string;
-        };
-        /** FloorChanged */
-        FloorChanged: {
-            /**
-             * @description discriminator enum property added by openapi-typescript
-             * @enum {string}
-             */
-            type: "floor.changed";
-            /** Busy */
-            busy: boolean;
-        };
-        /** HTTPValidationError */
-        HTTPValidationError: {
-            /** Detail */
-            detail?: components["schemas"]["ValidationError"][];
-        };
-        /** Health */
-        Health: {
-            /**
-             * Status
-             * @enum {string}
-             */
-            status: "ok" | "standby" | "degraded" | "down" | "unconfigured";
-            /**
-             * Detail
-             * @default
-             */
-            detail: string;
-        };
-        /** MeetingState */
-        MeetingState: {
+        /** AtlasState */
+        AtlasState: {
             /** Project Id */
             project_id: string;
             /** Protocol Version */
@@ -312,10 +149,10 @@ export interface components {
              */
             title: string;
             /**
-             * Assistant Name
-             * @default Assistant
+             * Identity Name
+             * @default Atlas
              */
-            assistant_name: string;
+            identity_name: string;
             /**
              * Language
              * @default en
@@ -346,6 +183,11 @@ export interface components {
              */
             floor_busy: boolean;
             /**
+             * Room Epoch
+             * @default 0
+             */
+            room_epoch: number;
+            /**
              * Partial
              * @default
              */
@@ -355,6 +197,7 @@ export interface components {
              * @default
              */
             notes: string;
+            notes_document?: components["schemas"]["NotesDocument"];
             /**
              * Notes Version
              * @default 0
@@ -427,6 +270,216 @@ export interface components {
             created_at?: string;
             /** Updated At */
             updated_at?: string;
+        };
+        /** BackendHello */
+        BackendHello: {
+            /**
+             * @description discriminator enum property added by openapi-typescript
+             * @enum {string}
+             */
+            type: "backend.hello";
+            /** Project Id */
+            project_id: string;
+            /** Protocol Version */
+            protocol_version: number;
+        };
+        /** BoardCurate */
+        BoardCurate: {
+            /**
+             * @description discriminator enum property added by openapi-typescript
+             * @enum {string}
+             */
+            type: "board.curate";
+        };
+        /** BootstrapResponse */
+        BootstrapResponse: {
+            /** Project Id */
+            project_id: string;
+            /** Display Name */
+            display_name: string;
+            /** Companion Name */
+            companion_name: string;
+            /** Protocol Version */
+            protocol_version: number;
+            /** Active Model */
+            active_model: string;
+            /** Models */
+            models: string[];
+            state: components["schemas"]["AtlasState"];
+            /** Sessions */
+            sessions: components["schemas"]["SessionSummary"][];
+        };
+        /** CaptureChanged */
+        CaptureChanged: {
+            /**
+             * @description discriminator enum property added by openapi-typescript
+             * @enum {string}
+             */
+            type: "capture.changed";
+            /**
+             * Source
+             * @enum {string}
+             */
+            source: "microphone" | "system";
+            /**
+             * Status
+             * @enum {string}
+             */
+            status: "active" | "denied" | "ended" | "unavailable";
+        };
+        /** Card */
+        Card: {
+            /** Id */
+            id?: string;
+            /**
+             * Kind
+             * @default finding
+             * @enum {string}
+             */
+            kind: "idea" | "question" | "decision" | "suggestion" | "finding";
+            /** Title */
+            title: string;
+            /** Body */
+            body: string;
+            /** Source Ids */
+            source_ids?: string[];
+            /**
+             * Concept Key
+             * @default
+             */
+            concept_key: string;
+            /** Updated At */
+            updated_at?: string;
+        };
+        /** ClientHello */
+        ClientHello: {
+            /**
+             * @description discriminator enum property added by openapi-typescript
+             * @enum {string}
+             */
+            type: "client.hello";
+            /** Protocol Version */
+            protocol_version: number;
+            /** Client Id */
+            client_id: string;
+            /** Capabilities */
+            capabilities?: {
+                [key: string]: boolean;
+            };
+        };
+        /** Decision */
+        Decision: {
+            /**
+             * Route
+             * @enum {string}
+             */
+            route: "ignore" | "capture" | "investigate" | "respond" | "act" | "control";
+            /**
+             * Addressee
+             * @default uncertain
+             * @enum {string}
+             */
+            addressee: "atlas" | "another_participant" | "room" | "uncertain";
+            /**
+             * Memory
+             * @default ignore
+             * @enum {string}
+             */
+            memory: "ignore" | "capture";
+            /**
+             * Initiative
+             * @default none
+             * @enum {string}
+             */
+            initiative: "none" | "assigned" | "proactive";
+            /**
+             * Speech Depth
+             * @default silent
+             * @enum {string}
+             */
+            speech_depth: "silent" | "brief" | "normal" | "deep";
+            /**
+             * Timing
+             * @default silent
+             * @enum {string}
+             */
+            timing: "silent" | "next_gap" | "later";
+            /**
+             * Rationale
+             * @default
+             */
+            rationale: string;
+        };
+        /** DecisionRecord */
+        DecisionRecord: {
+            /** Id */
+            id?: string;
+            /** Utterance Id */
+            utterance_id: string;
+            /** Context */
+            context: {
+                [key: string]: unknown;
+            };
+            result: components["schemas"]["Decision"];
+            /** Decided At */
+            decided_at?: string;
+        };
+        /** FloorChanged */
+        FloorChanged: {
+            /**
+             * @description discriminator enum property added by openapi-typescript
+             * @enum {string}
+             */
+            type: "floor.changed";
+            /** Busy */
+            busy: boolean;
+        };
+        /** HTTPValidationError */
+        HTTPValidationError: {
+            /** Detail */
+            detail?: components["schemas"]["ValidationError"][];
+        };
+        /** Health */
+        Health: {
+            /**
+             * Status
+             * @enum {string}
+             */
+            status: "ok" | "standby" | "degraded" | "down" | "unconfigured";
+            /**
+             * Detail
+             * @default
+             */
+            detail: string;
+        };
+        /** NotesDocument */
+        NotesDocument: {
+            /** Synthesis */
+            synthesis?: string[];
+            /** Participants */
+            participants?: string[];
+            /** Topics */
+            topics?: string[];
+            /** Findings */
+            findings?: string[];
+            /** Ideas */
+            ideas?: string[];
+            /** Hypotheses */
+            hypotheses?: string[];
+            /** Questions */
+            questions?: string[];
+            /** Decisions */
+            decisions?: string[];
+            /** Recommendations */
+            recommendations?: string[];
+            /** Commitments */
+            commitments?: string[];
+            /** Actions */
+            actions?: string[];
+            /** Current Work */
+            current_work?: string[];
+            /** Source Ids */
+            source_ids?: string[];
         };
         /** PipelineMetrics */
         PipelineMetrics: {
@@ -524,7 +577,7 @@ export interface components {
             /** Client */
             client: components["schemas"]["ClientHello"] | components["schemas"]["BoardCurate"] | components["schemas"]["SessionStart"] | components["schemas"]["SessionOpen"] | components["schemas"]["SessionLanguage"] | components["schemas"]["VoiceModeCommand"] | components["schemas"]["SessionCommand"] | components["schemas"]["FloorChanged"] | components["schemas"]["CaptureChanged"] | components["schemas"]["TranscriptInject"] | components["schemas"]["PlaybackChanged"];
             /** Server */
-            server: components["schemas"]["BackendHello"] | components["schemas"]["StateSnapshot"] | components["schemas"]["TranscriptPartial"] | components["schemas"]["SpeechAuthorized"] | components["schemas"]["SpeechStop"] | components["schemas"]["PresenceCue"] | components["schemas"]["ProtocolError"];
+            server: components["schemas"]["BackendHello"] | components["schemas"]["StateSnapshot"] | components["schemas"]["TranscriptPartial"] | components["schemas"]["SpeechAuthorized"] | components["schemas"]["SpeechStop"] | components["schemas"]["SpeechAudioChunk"] | components["schemas"]["SpeechAudioEnd"] | components["schemas"]["SpeechSubtitle"] | components["schemas"]["PresenceCue"] | components["schemas"]["ProtocolError"];
         };
         /** ProtocolError */
         ProtocolError: {
@@ -587,11 +640,6 @@ export interface components {
              */
             type: "session.start";
             /**
-             * Assistant Name
-             * @default Assistant
-             */
-            assistant_name: string;
-            /**
              * Language
              * @default en
              * @enum {string}
@@ -653,9 +701,16 @@ export interface components {
              * @default proposed
              * @enum {string}
              */
-            status: "proposed" | "waiting_gap" | "authorized" | "playing" | "finished" | "interrupted" | "suppressed" | "expired";
+            status: "proposed" | "waiting_gap" | "authorized" | "playing" | "finished" | "interrupted" | "suppressed" | "expired" | "canceled" | "failed";
             /** Source Ids */
             source_ids?: string[];
+            /**
+             * Room Epoch
+             * @default 0
+             */
+            room_epoch: number;
+            /** Error */
+            error?: string | null;
             /** Created At */
             created_at?: string;
         };
@@ -667,6 +722,34 @@ export interface components {
             format: string;
             /** Sample Rate */
             sample_rate: number;
+        };
+        /** SpeechAudioChunk */
+        SpeechAudioChunk: {
+            /**
+             * @description discriminator enum property added by openapi-typescript
+             * @enum {string}
+             */
+            type: "speech.audio.chunk";
+            /** Speech Id */
+            speech_id: string;
+            /** Sequence */
+            sequence: number;
+            /** Data Base64 */
+            data_base64: string;
+            /** Format */
+            format: string;
+            /** Sample Rate */
+            sample_rate: number;
+        };
+        /** SpeechAudioEnd */
+        SpeechAudioEnd: {
+            /**
+             * @description discriminator enum property added by openapi-typescript
+             * @enum {string}
+             */
+            type: "speech.audio.end";
+            /** Speech Id */
+            speech_id: string;
         };
         /** SpeechAuthorized */
         SpeechAuthorized: {
@@ -695,6 +778,38 @@ export interface components {
             /** Reason */
             reason: string;
         };
+        /** SpeechSubtitle */
+        SpeechSubtitle: {
+            /**
+             * @description discriminator enum property added by openapi-typescript
+             * @enum {string}
+             */
+            type: "speech.subtitle";
+            /** Speech Id */
+            speech_id: string;
+            /** Text */
+            text: string;
+            /**
+             * Segment Index
+             * @default 0
+             */
+            segment_index: number;
+            /**
+             * Start S
+             * @default 0
+             */
+            start_s: number;
+            /**
+             * Stop S
+             * @default 0
+             */
+            stop_s: number;
+            /**
+             * Final
+             * @default false
+             */
+            final: boolean;
+        };
         /** StateSnapshot */
         StateSnapshot: {
             /**
@@ -702,7 +817,7 @@ export interface components {
              * @enum {string}
              */
             type: "state.snapshot";
-            state: components["schemas"]["MeetingState"];
+            state: components["schemas"]["AtlasState"];
             /** Sessions */
             sessions: components["schemas"]["SessionSummary"][];
         };
@@ -710,6 +825,11 @@ export interface components {
         Task: {
             /** Id */
             id?: string;
+            /**
+             * Mission Key
+             * @default
+             */
+            mission_key: string;
             /** Tool */
             tool: string;
             /** Summary */
@@ -720,6 +840,12 @@ export interface components {
              * @enum {string}
              */
             status: "queued" | "running" | "done" | "failed" | "canceled" | "stale";
+            /**
+             * Phase
+             * @default queued
+             * @enum {string}
+             */
+            phase: "queued" | "planning" | "executing" | "synthesizing" | "integrating" | "reporting" | "complete";
             /** Result */
             result?: {
                 [key: string]: unknown;

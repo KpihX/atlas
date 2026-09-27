@@ -1,4 +1,5 @@
 export type CaptureMode = "microphone" | "system" | "mixed";
+export type CaptureResult = { microphone: boolean; system: boolean };
 
 type FloorCallback = (busy: boolean) => void;
 type ChunkCallback = (chunk: ArrayBuffer) => void;
@@ -8,8 +9,18 @@ export class AudioBridge {
   private context?: AudioContext;
   private streams: MediaStream[] = [];
   private processor?: ScriptProcessorNode;
+  private floorProcessor?: ScriptProcessorNode;
   private playback?: AudioBufferSourceNode;
-  private cue?: { source: AudioBufferSourceNode; gain: GainNode };
+  private streamSources = new Set<AudioBufferSourceNode>();
+  private streamNextTime = 0;
+  private streamEnded = false;
+  private streamPromise?: Promise<void>;
+  private streamResolve?: () => void;
+  private cue?: {
+    node: AudioBufferSourceNode;
+    masterGain: GainNode;
+  };
+  private cueRequest = 0;
   private playbackActive = false;
   private voicedFrames = 0;
   private floorBusy = false;
@@ -23,18 +34,24 @@ export class AudioBridge {
     private readonly onBargeIn: () => void,
   ) {}
 
-  async start(mode: CaptureMode): Promise<void> {
+  async start(mode: CaptureMode): Promise<CaptureResult> {
     await this.stopCapture();
     this.context = new AudioContext();
+    let microphone = false;
+    let system = false;
+    let microphoneStream: MediaStream | undefined;
+    let systemStream: MediaStream | undefined;
     if (mode === "microphone" || mode === "mixed") {
-      this.streams.push(await navigator.mediaDevices.getUserMedia({
+      microphoneStream = await navigator.mediaDevices.getUserMedia({
         audio: {
           channelCount: 1,
           echoCancellation: true,
           noiseSuppression: true,
           autoGainControl: true,
         },
-      }));
+      });
+      this.streams.push(microphoneStream);
+      microphone = true;
     }
     if (mode === "system" || mode === "mixed") {
       try {
@@ -54,7 +71,9 @@ export class AudioBridge {
             );
           }
         } else {
+          systemStream = display;
           this.streams.push(display);
+          system = true;
         }
       } catch (error) {
         if (mode === "system") throw error;
@@ -64,18 +83,36 @@ export class AudioBridge {
     const mix = this.context.createGain();
     for (const stream of this.streams) this.context.createMediaStreamSource(stream).connect(mix);
     this.processor = this.context.createScriptProcessor(4096, 1, 1);
-    const silent = this.context.createGain();
-    silent.gain.value = 0;
+    const silentMix = this.context.createGain();
+    silentMix.gain.value = 0;
     mix.connect(this.processor);
-    this.processor.connect(silent);
-    silent.connect(this.context.destination);
-    this.processor.onaudioprocess = (event) => this.process(event.inputBuffer.getChannelData(0));
+    this.processor.connect(silentMix);
+    silentMix.connect(this.context.destination);
+    this.processor.onaudioprocess = (event) => this.processPcm(event.inputBuffer.getChannelData(0));
+
+    const floorStream = microphoneStream ?? systemStream;
+    if (floorStream) {
+      const floorSource = this.context.createMediaStreamSource(floorStream);
+      this.floorProcessor = this.context.createScriptProcessor(2048, 1, 1);
+      const silentFloor = this.context.createGain();
+      silentFloor.gain.value = 0;
+      floorSource.connect(this.floorProcessor);
+      this.floorProcessor.connect(silentFloor);
+      silentFloor.connect(this.context.destination);
+      this.floorProcessor.onaudioprocess = (event) => {
+        this.processFloor(event.inputBuffer.getChannelData(0));
+      };
+    }
     await this.context.resume();
+    return { microphone, system };
   }
 
   async stopCapture(): Promise<void> {
+    this.stopPlayback();
     this.processor?.disconnect();
     this.processor = undefined;
+    this.floorProcessor?.disconnect();
+    this.floorProcessor = undefined;
     for (const stream of this.streams) stream.getTracks().forEach((track) => track.stop());
     this.streams = [];
     if (this.context) await this.context.close();
@@ -114,8 +151,49 @@ export class AudioBridge {
     this.playback = undefined;
   }
 
+  async beginPcmStream(): Promise<void> {
+    this.stopPlayback();
+    const context = this.context && this.context.state !== "closed" ? this.context : new AudioContext();
+    if (!this.context) this.context = context;
+    this.playbackActive = true;
+    this.streamEnded = false;
+    this.streamNextTime = context.currentTime + 0.04;
+    this.streamPromise = new Promise<void>((resolve) => {
+      this.streamResolve = resolve;
+    });
+    await context.resume();
+  }
+
+  pushPcmChunk(base64: string, sampleRate: number): void {
+    if (!this.playbackActive || !this.context) return;
+    const bytes = Uint8Array.from(atob(base64), (character) => character.charCodeAt(0));
+    const samples = new Int16Array(bytes.buffer);
+    if (samples.length === 0) return;
+    const buffer = this.context.createBuffer(1, samples.length, sampleRate);
+    const channel = buffer.getChannelData(0);
+    for (let index = 0; index < samples.length; index += 1) channel[index] = samples[index] / 32768;
+    const source = this.context.createBufferSource();
+    source.buffer = buffer;
+    source.connect(this.context.destination);
+    const startAt = Math.max(this.context.currentTime + 0.015, this.streamNextTime);
+    this.streamNextTime = startAt + buffer.duration;
+    this.streamSources.add(source);
+    source.onended = () => {
+      this.streamSources.delete(source);
+      this.completePcmStreamIfReady();
+    };
+    source.start(startAt);
+  }
+
+  endPcmStream(): Promise<void> {
+    this.streamEnded = true;
+    this.completePcmStreamIfReady();
+    return this.streamPromise ?? Promise.resolve();
+  }
+
   async playCue(audio?: { data_base64?: string; format?: string; sample_rate?: number }): Promise<void> {
     if (this.playbackActive || this.floorBusy || this.cue || !audio?.data_base64) return;
+    const request = ++this.cueRequest;
     const context = this.context && this.context.state !== "closed" ? this.context : new AudioContext();
     if (!this.context) this.context = context;
     await context.resume();
@@ -129,32 +207,42 @@ export class AudioBridge {
     } else {
       buffer = await context.decodeAudioData(bytes.buffer.slice(0) as ArrayBuffer);
     }
-    const gain = context.createGain();
-    const source = context.createBufferSource();
+    if (request !== this.cueRequest || this.playbackActive || this.floorBusy || this.cue) return;
+
+    const node = context.createBufferSource();
+    node.buffer = buffer;
+    const masterGain = context.createGain();
     const now = context.currentTime;
-    source.buffer = buffer;
-    source.loop = true;
-    if (buffer.duration > 0.4) {
-      source.loopStart = 0.15;
-      source.loopEnd = Math.max(0.3, buffer.duration - 0.1);
-    }
-    gain.gain.setValueAtTime(0.0001, now);
-    gain.gain.exponentialRampToValueAtTime(0.22, now + 0.1);
-    source.connect(gain);
-    gain.connect(context.destination);
-    source.start(now);
-    this.cue = { source, gain };
+    const duration = Math.min(0.42, buffer.duration);
+    masterGain.gain.setValueAtTime(0.0001, now);
+    masterGain.gain.exponentialRampToValueAtTime(0.2, now + 0.05);
+    masterGain.gain.setValueAtTime(0.2, now + Math.max(0.06, duration - 0.12));
+    masterGain.gain.exponentialRampToValueAtTime(0.0001, now + duration);
+    node.connect(masterGain);
+    masterGain.connect(context.destination);
+    this.cue = { node, masterGain };
+    node.onended = () => {
+      if (this.cue?.node === node) this.cue = undefined;
+      try {
+        node.disconnect();
+        masterGain.disconnect();
+      } catch {
+        // The audio graph may already be disconnected with its context.
+      }
+    };
+    node.start(now, 0, duration);
   }
 
   stopCue(): void {
+    this.cueRequest += 1;
     if (!this.cue || !this.context) return;
     const cue = this.cue;
     this.cue = undefined;
     const now = this.context.currentTime;
-    cue.gain.gain.cancelScheduledValues(now);
-    cue.gain.gain.setValueAtTime(Math.max(cue.gain.gain.value, 0.0001), now);
-    cue.gain.gain.exponentialRampToValueAtTime(0.0001, now + 0.25);
-    cue.source.stop(now + 0.27);
+    cue.masterGain.gain.cancelScheduledValues(now);
+    cue.masterGain.gain.setValueAtTime(Math.max(cue.masterGain.gain.value, 0.0001), now);
+    cue.masterGain.gain.exponentialRampToValueAtTime(0.0001, now + 0.08);
+    cue.node.stop(now + 0.08);
   }
 
   stopPlayback(): void {
@@ -168,9 +256,29 @@ export class AudioBridge {
       }
       this.playback = undefined;
     }
+    for (const source of this.streamSources) {
+      try {
+        source.stop();
+      } catch {
+        // The scheduled chunk may already have ended.
+      }
+    }
+    this.streamSources.clear();
+    this.streamEnded = true;
+    this.streamResolve?.();
+    this.streamResolve = undefined;
+    this.streamPromise = undefined;
   }
 
-  private process(input: Float32Array): void {
+  private completePcmStreamIfReady(): void {
+    if (!this.streamEnded || this.streamSources.size > 0) return;
+    this.playbackActive = false;
+    this.streamResolve?.();
+    this.streamResolve = undefined;
+    this.streamPromise = undefined;
+  }
+
+  private processFloor(input: Float32Array): void {
     if (!this.context) return;
     let energy = 0;
     for (const sample of input) energy += sample * sample;
@@ -196,6 +304,10 @@ export class AudioBridge {
     } else {
       this.voicedFrames = 0;
     }
+  }
+
+  private processPcm(input: Float32Array): void {
+    if (!this.context) return;
     this.queuePcm(downsamplePcm16(input, this.context.sampleRate, 24000));
   }
 

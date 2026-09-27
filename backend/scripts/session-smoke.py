@@ -7,6 +7,8 @@ from typing import Any
 
 from websockets.asyncio.client import ClientConnection, connect
 
+from atlas.config import load_product
+
 
 async def snapshot(websocket: ClientConnection, status: str) -> dict[str, Any]:
     async with asyncio.timeout(15):
@@ -18,13 +20,13 @@ async def snapshot(websocket: ClientConnection, status: str) -> dict[str, Any]:
 
 
 async def main() -> None:
-    url = os.environ.get("SIDECAR_WS_URL", "ws://127.0.0.1:8787/v1/live")
+    url = os.environ.get("ATLAS_WS_URL", "ws://127.0.0.1:8787/v1/live")
     async with connect(url) as websocket:
         await websocket.send(
             json.dumps(
                 {
                     "type": "client.hello",
-                    "protocol_version": 7,
+                    "protocol_version": load_product().protocol_version,
                     "client_id": "session-smoke",
                     "capabilities": {"audio_capture": False, "audio_playback": False},
                 }
@@ -32,7 +34,6 @@ async def main() -> None:
         )
         start = {
             "type": "session.start",
-            "assistant_name": "Assistant",
             "language": "fr",
             "capture_mode": "microphone",
             "output_mode": "local_only",

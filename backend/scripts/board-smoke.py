@@ -4,11 +4,11 @@ import asyncio
 import json
 import sys
 
-from sidecar.adapters.sqlite import SQLiteStore
-from sidecar.config import load_config
-from sidecar.core.coordinator import Coordinator
-from sidecar.core.tools import ToolRegistry
-from sidecar.llm import OpenAICompatibleGenerator
+from atlas.adapters.sqlite import SQLiteStore
+from atlas.config import load_config
+from atlas.core.coordinator import Coordinator
+from atlas.core.tools import ToolRegistry
+from atlas.llm import OpenAICompatibleGenerator
 
 
 async def main(session_id: str, model_id: str | None = None) -> None:
@@ -19,7 +19,8 @@ async def main(session_id: str, model_id: str | None = None) -> None:
     if state is None:
         raise SystemExit(f"unknown session: {session_id}")
     generator = OpenAICompatibleGenerator(config.llm)
-    coordinator = Coordinator(generator, ToolRegistry(1), config.policy, model_id or config.llm.utility_model)
+    roles = config.llm.roles.model_copy(update={"board": model_id}) if model_id else config.llm.roles
+    coordinator = Coordinator(generator, ToolRegistry(1), config.policy, roles)
     operations = await coordinator.curate_board(state)
     print(f"raw: {coordinator.last_board_response!r}")
     print(json.dumps([item.model_dump(mode="json") for item in operations], ensure_ascii=False, indent=2))

@@ -11,7 +11,7 @@ import {
   X,
 } from "lucide-react";
 import { useState, type ComponentType } from "react";
-import type { MeetingState } from "../protocol";
+import type { AtlasState } from "../protocol";
 
 type AudioStatus = "idle" | "requesting" | "active" | "paused" | "error";
 type NodeKey = "room" | "stt" | "memory" | "jev" | "speaker" | "worker" | "notes" | "board" | "voice";
@@ -50,7 +50,7 @@ const EDGES: Array<[NodeKey, NodeKey, string]> = [
   ["voice", "room", "voice"],
 ];
 
-export function WorkflowCanvas({ state, audioStatus }: { state: MeetingState; audioStatus: AudioStatus }) {
+export function WorkflowCanvas({ state, audioStatus }: { state: AtlasState; audioStatus: AudioStatus }) {
   const [selected, setSelected] = useState<NodeKey | null>(null);
   const agentRuns = state.agent_runs ?? [];
   const running = agentRuns.filter((run) => run.status === "running");
@@ -63,16 +63,28 @@ export function WorkflowCanvas({ state, audioStatus }: { state: MeetingState; au
   const naming = running.find((run) => run.agent === "naming");
   const speech = state.speeches.at(-1);
   const decision = state.decisions?.at(-1);
+  const decisionActive = Boolean(
+    decision?.decided_at && Date.now() - new Date(decision.decided_at).getTime() < 3000,
+  );
+  const recentBoardActivity = state.activities
+    .slice()
+    .reverse()
+    .find((item) => item.kind.startsWith("board."));
+  const recentBoardActivityAt = recentBoardActivity?.created_at;
+  const boardActive = Boolean(
+    worker?.agent === "coordinator"
+    || (recentBoardActivityAt && Date.now() - new Date(recentBoardActivityAt).getTime() < 3000),
+  );
   const pipeline = state.pipeline;
   const nodes: FlowNode[] = [
     { key: "room", label: "Room", detail: `${pipeline?.audio_frames ?? 0} audio frames`, status: audioStatus, icon: Mic2, active: audioStatus === "active" },
     { key: "stt", label: "Gradium STT", detail: `${pipeline?.stt_fragments ?? 0} fragments, ${pipeline?.stt_turns ?? 0} turns`, status: pipeline?.stt_last_event || "waiting", icon: AudioLines, active: state.session_status === "listening" },
-    { key: "memory", label: "Shared memory", detail: `${state.transcript.length} turns, ${tasks.length} tasks`, status: "live", icon: Database, active: true },
-    { key: "jev", label: "Jev router", detail: decision ? `${decision.result.route} / ${(decision.result.addressed_probability * 100).toFixed(0)}% addressed` : "Waiting for a turn", status: decision?.result.timing || "idle", icon: BrainCircuit, active: Boolean(decision && state.pipeline?.decisions) },
-    { key: "speaker", label: "Speaker", detail: speaker?.summary || "Always available", status: speaker?.status || state.voice_mode || "active", icon: Bot, active: Boolean(speaker) },
+    { key: "memory", label: "Shared memory", detail: `${state.transcript.length} turns, ${tasks.length} tasks`, status: "synced", icon: Database, active: running.length > 0 || runningTasks.length > 0 },
+    { key: "jev", label: "Jev router", detail: decision ? `${decision.result.route} / ${decision.result.addressee} / ${decision.result.initiative}` : "Waiting for a turn", status: decisionActive ? "deciding" : "idle", icon: BrainCircuit, active: decisionActive },
+    { key: "speaker", label: "Speaker", detail: speaker?.summary || "Ready when addressed", status: speaker?.status || (state.voice_mode === "muted" ? "muted" : "idle"), icon: Bot, active: Boolean(speaker) },
     { key: "worker", label: "Workers", detail: worker?.summary || lastTask?.summary || "No mission running", status: runningTasks.length ? `${runningTasks.length} running` : lastTask?.status || "idle", icon: Search, active: Boolean(worker || runningTasks.length) },
     { key: "notes", label: "Notes agent", detail: notes?.summary || `${state.notes_cursor ?? 0}/${state.transcript.length} turns integrated`, status: notes?.status || `v${state.notes_version ?? 0}`, icon: FileText, active: Boolean(notes) },
-    { key: "board", label: "Board curator", detail: `${state.cards.length} durable concepts`, status: naming ? "naming" : "synced", icon: Lightbulb, active: Boolean(worker) },
+    { key: "board", label: "Board curator", detail: `${state.cards.length} durable concepts`, status: boardActive ? "curating" : naming ? "naming" : "synced", icon: Lightbulb, active: boardActive },
     { key: "voice", label: "Voice", detail: speech?.text || "Waiting for a useful moment", status: speech?.status || "idle", icon: Volume2, active: Boolean(speech && ["waiting_gap", "authorized", "playing"].includes(speech.status)) },
   ];
   const active = new Set<NodeKey>(nodes.filter((node) => node.active).map((node) => node.key));
@@ -112,7 +124,7 @@ export function WorkflowCanvas({ state, audioStatus }: { state: MeetingState; au
   </section>;
 }
 
-function NodeInspector({ node, state, close }: { node: NodeKey; state: MeetingState; close: () => void }) {
+function NodeInspector({ node, state, close }: { node: NodeKey; state: AtlasState; close: () => void }) {
   const runs = (state.agent_runs ?? []).filter((run) => {
     if (node === "speaker") return run.agent === "speaker";
     if (node === "worker") return run.agent === "worker" || run.agent === "coordinator";
@@ -125,13 +137,13 @@ function NodeInspector({ node, state, close }: { node: NodeKey; state: MeetingSt
       {(state.decisions ?? []).slice(-6).reverse().map((decision) => <article className="inspection-card" key={decision.id}>
         <div><b>{decision.result.route}</b><time>{decision.decided_at ? new Date(decision.decided_at).toLocaleTimeString() : "now"}</time></div>
         <p>{decision.context.new_utterance as string}</p>
-        <dl><dt>Addressed</dt><dd>{(decision.result.addressed_probability * 100).toFixed(0)}%</dd><dt>Salience</dt><dd>{decision.result.salience.toFixed(2)}</dd><dt>Timing</dt><dd>{decision.result.timing}</dd></dl>
+        <dl><dt>Addressee</dt><dd>{decision.result.addressee}</dd><dt>Initiative</dt><dd>{decision.result.initiative}</dd><dt>Memory</dt><dd>{decision.result.memory}</dd><dt>Timing</dt><dd>{decision.result.timing}</dd></dl>
         <details><summary>Context sent to Jev</summary><pre>{JSON.stringify(decision.context, null, 2)}</pre></details>
       </article>)}
       {!state.decisions?.length && <p className="muted">No Jev decision yet.</p>}
     </div>}
     {node === "worker" && <div className="inspector-stack">
-      {state.tasks.slice().reverse().map((task) => <article className="inspection-card" key={task.id}><div><b>{task.tool}</b><span className={task.status}>{task.status}</span></div><p>{task.summary}</p>{task.result && <details><summary>Result projection</summary><pre>{JSON.stringify(task.result, null, 2)}</pre></details>}</article>)}
+      {state.tasks.slice().reverse().map((task) => <article className="inspection-card" key={task.id}><div><b>{task.tool}</b><span className={task.status}>{task.phase}</span></div><p>{task.summary}</p>{task.result && <details><summary>Result projection</summary><pre>{JSON.stringify(task.result, null, 2)}</pre></details>}</article>)}
       {!state.tasks.length && <p className="muted">No worker mission yet.</p>}
     </div>}
     {node === "memory" && <div className="memory-inspector"><Stat label="Transcript" value={state.transcript.length} /><Stat label="Cards" value={state.cards.length} /><Stat label="Tasks" value={state.tasks.length} /><Stat label="Notes version" value={state.notes_version ?? 0} /><Stat label="Speech turns" value={state.speeches.length} /><Stat label="Activities" value={state.activities.length} /></div>}
