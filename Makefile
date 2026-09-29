@@ -51,9 +51,9 @@ dev-frontend:  ## Run Vite
 check: check-backend check-frontend  ## Run every project check
 
 check-backend:  ## Lint, format-check, type-check, and test backend
-	@uv run --project $(BACKEND) ruff check .
-	@uv run --project $(BACKEND) ruff format --check .
-	@uv run --project $(BACKEND) pyright
+	@ruff check .
+	@ruff format --check .
+	@pyright --pythonpath $(BACKEND)/.venv/bin/python
 	@uv run --project $(BACKEND) pytest
 
 check-frontend:  ## Type-check and build frontend
